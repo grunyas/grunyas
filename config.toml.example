@@ -1,0 +1,44 @@
+[server]
+listen_addr = "0.0.0.0:5711"
+admin_addr = "0.0.0.0:5712"
+
+max_sessions = 1000
+
+client_idle_timeout = 300
+
+keep_alive_timeout = 15
+keep_alive_interval = 15
+keep_alive_count = 9
+
+ssl_mode = "mandatory"
+ssl_cert = "server.crt"
+ssl_key = "server.key"
+
+[logging]
+level = "info"
+development = true
+
+[telemetry]
+# Leave empty to disable OTLP.
+otlp_endpoint = ""
+insecure = true
+service_name = "grunyas"
+
+[auth]
+method = "md5" # options: plain, md5, scram-sha-256
+username = "postgres"
+password = "postgres" # plain, md5 hash, or SCRAM stored secret
+
+[backend]
+host = "127.0.0.1"
+port = 5432
+user = "postgres"
+password = ""
+database = "postgres"
+connect_timeout_seconds = 5
+
+pool_min_conns = 2              # Minimum connections to keep warm
+pool_max_conns = 10             # Maximum connections in pool
+pool_max_conn_lifetime = 3600   # Max connection lifetime (1 hour)
+pool_max_conn_idle_time = 1800  # Max idle time before closing (30 minutes)
+pool_health_check_period = 60   # Health check interval (1 minute)

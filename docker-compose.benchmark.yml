@@ -1,0 +1,75 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    command: ["postgres", "-c", "max_connections=500"]
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    networks:
+      - benchmark
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  grunyas:
+    build:
+      context: .
+      dockerfile: benchmark/Dockerfile
+    ports:
+      - "5711:5711"
+    networks:
+      - benchmark
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    ports:
+      - "6432:5432"
+    networks:
+      - benchmark
+    environment:
+      DATABASE_URL: "postgres://postgres:postgres@postgres:5432/postgres"
+      POOL_MODE: session
+      DEFAULT_POOL_SIZE: 10
+      MIN_POOL_SIZE: 2
+      MAX_CLIENT_CONN: 1000
+      AUTH_TYPE: scram-sha-256
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 5432 || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  pgcat:
+    image: ghcr.io/postgresml/pgcat:latest
+    ports:
+      - "6433:6433"
+    networks:
+      - benchmark
+    volumes:
+      - ./benchmark/pgcat:/etc/pgcat:ro
+    command: ["/usr/bin/pgcat", "/etc/pgcat/pgcat.toml"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 6433 || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+networks:
+  benchmark:
+    driver: bridge
