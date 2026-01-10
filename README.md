@@ -132,6 +132,7 @@ client_idle_timeout = 300
 keep_alive_timeout = 15
 keep_alive_interval = 15
 keep_alive_count = 9
+pool_mode = "session"           # options: session, transaction
 ssl_mode = "optional"           # options: never, optional, mandatory
 ssl_cert = "server.crt"         # path to certificate file (required for optional/mandatory)
 ssl_key = "server.key"          # path to key file (required for optional/mandatory)

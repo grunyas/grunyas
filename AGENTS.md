@@ -25,6 +25,7 @@ This file is a fast-start guide for working on this project with minimal back-an
 - CLI flag: `-no-console` disables the interactive TUI console.
 - Defaults set in `cmd/main.go` for SSL values:
   - `server.ssl_mode=never`, `server.ssl_cert=""`, `server.ssl_key=""`.
+- Pool mode: `server.pool_mode` supports `session` (default) or `transaction`.
 - Example config: `config.toml.example`.
 
 ## Project map (where to look first)

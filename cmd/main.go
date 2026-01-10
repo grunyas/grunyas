@@ -98,6 +98,7 @@ func bindEnvKeys() {
 		"server.ssl_mode",
 		"server.ssl_cert",
 		"server.ssl_key",
+		"server.pool_mode",
 		"logging.level",
 		"logging.development",
 		"telemetry.otlp_endpoint",
