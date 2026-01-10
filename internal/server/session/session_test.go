@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/grunyas/grunyas/config"
 	"github.com/grunyas/grunyas/internal/server/downstream_client"
 	"github.com/grunyas/grunyas/internal/server/types"
+	"github.com/jackc/pgx/v5/pgproto3"
 	"go.uber.org/zap"
 )
 
@@ -61,10 +61,18 @@ func (m *mockUpstream) TxStatus() byte {
 	return m.txStatus
 }
 
-func (m *mockUpstream) Release() {
+func (m *mockUpstream) Release() error {
 	if m.releaseFunc != nil {
 		m.releaseFunc()
 	}
+	return nil
+}
+
+func (m *mockUpstream) Kill() error {
+	if m.releaseFunc != nil {
+		m.releaseFunc()
+	}
+	return nil
 }
 
 func (m *mockUpstream) Receive(ctx context.Context) (pgproto3.BackendMessage, error) {

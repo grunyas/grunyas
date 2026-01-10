@@ -9,9 +9,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/grunyas/grunyas/internal/server/messaging"
 	"github.com/grunyas/grunyas/internal/server/types"
+	"github.com/jackc/pgx/v5/pgproto3"
 	"go.uber.org/zap"
 )
 
@@ -225,7 +225,16 @@ func (sess *Session) Close() {
 
 		if sess.upstream != nil {
 			sess.log.Info("releasing connection back to pool")
-			sess.upstream.Release()
+			err := sess.upstream.Release()
+			if err != nil {
+				sess.log.Error("failed to release connection", zap.Error(err))
+
+				sess.log.Info("killing connection")
+				err := sess.upstream.Kill()
+				if err != nil {
+					sess.log.Error("failed to kill connection", zap.Error(err))
+				}
+			}
 		}
 	})
 }

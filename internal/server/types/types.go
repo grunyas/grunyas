@@ -5,8 +5,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/grunyas/grunyas/config"
+	"github.com/jackc/pgx/v5/pgproto3"
 	"go.uber.org/zap"
 )
 
@@ -55,14 +55,17 @@ type UpstreamClientInterface interface {
 	// Send sends the given messages to the database.
 	Send(...pgproto3.FrontendMessage) error
 
+	// Receive reads a message from the upstream connection.
+	Receive(ctx context.Context) (pgproto3.BackendMessage, error)
+
 	// TxStatus returns the current transaction status of the upstream connection.
 	TxStatus() byte
 
 	// Release releases the connection back to the pool.
-	Release()
+	Release() error
 
-	// Receive reads a message from the upstream connection.
-	Receive(ctx context.Context) (pgproto3.BackendMessage, error)
+	// Kill destroys the connection instead of returning it to the pool.
+	Kill() error
 }
 
 // ResultReader defines the interface for streaming results from an upstream query.

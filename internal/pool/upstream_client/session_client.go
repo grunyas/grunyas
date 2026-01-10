@@ -48,13 +48,19 @@ func (s *SessionClient) Receive(ctx context.Context) (pgproto3.BackendMessage, e
 //
 // NOTE: This is safe because Release() is only called from session.Close()
 // AFTER wg.Wait() ensures the upstreamReadLoop goroutine has exited.
-func (s *SessionClient) Release() {
+func (s *SessionClient) Release() error {
 	if err := s.reset(); err != nil {
-		// If reset fails, destroy the connection instead of returning it to the pool
-		s.conn.Hijack().Close(context.Background())
-		return
+		return err
 	}
+
 	s.conn.Release()
+
+	return nil
+}
+
+// Kill destroys the connection instead of returning it to the pool.
+func (s *SessionClient) Kill() error {
+	return s.conn.Hijack().Close(context.Background())
 }
 
 // reset executes DISCARD ALL to clear any session-level state.
