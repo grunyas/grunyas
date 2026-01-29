@@ -26,8 +26,11 @@ type ProxyInterface interface {
 	// PoolStats returns the current statistics of the database connection pool.
 	PoolStats() PoolStats
 
-	// Authenticate validates the user credentials and returns an upstream connection if successful.
-	Authenticate(user, password string) (UpstreamClientInterface, error)
+	// AuthenticateUser validates the user credentials.
+	AuthenticateUser(user, password string) error
+
+	// AcquireUpstream obtains a connection from the pool.
+	AcquireUpstream() (UpstreamClientInterface, error)
 }
 
 // PoolStats represents the current statistics of the database connection pool.

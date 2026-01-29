@@ -168,17 +168,11 @@ func (prx *Proxy) PoolStats() types.PoolStats {
 }
 
 // Authenticate validates the provided user credentials and returns an upstream connection if successful.
-func (prx *Proxy) Authenticate(user, password string) (types.UpstreamClientInterface, error) {
+func (prx *Proxy) AuthenticateUser(user, password string) error {
 	if err := prx.auth.AuthenticateUser(user, password); err != nil {
-		return nil, &types.ProxyError{Code: "28P01", Message: err.Error()}
+		return &types.ProxyError{Code: "28P01", Message: err.Error()}
 	}
-
-	upstream, err := prx.AcquireUpstream()
-	if err != nil {
-		return nil, &types.ProxyError{Code: "53300", Message: "connection pool exhausted, please try again later"}
-	}
-
-	return upstream, nil
+	return nil
 }
 
 // AcquireUpstream acquires a connection from the database pool.

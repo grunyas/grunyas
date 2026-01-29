@@ -27,7 +27,7 @@ func Default() Config {
 			KeepAliveTimeout:  15,
 			KeepAliveInterval: 15,
 			KeepAliveCount:    9,
-			PoolMode:          "session",
+			PoolMode:          PoolModeSession,
 		},
 		BackendConfig: DatabasePoolConfig{
 			DatabaseConnectTimeoutSeconds: 5,
@@ -122,10 +122,13 @@ func (c *Config) Validate() error {
 		errs = append(errs, "server.ssl_mode must be one of: never, optional, mandatory")
 	}
 
-	switch strings.ToLower(c.ServerConfig.PoolMode) {
-	case "", "session":
-		// default handled elsewhere
-	case "transaction":
+	switch PoolMode(strings.ToLower(string(c.ServerConfig.PoolMode))) {
+	case "":
+		c.ServerConfig.PoolMode = PoolModeSession
+	case PoolModeSession:
+		c.ServerConfig.PoolMode = PoolModeSession
+	case PoolModeTransaction:
+		c.ServerConfig.PoolMode = PoolModeTransaction
 	default:
 		errs = append(errs, "server.pool_mode must be one of: session, transaction")
 	}

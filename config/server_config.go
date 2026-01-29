@@ -39,5 +39,12 @@ type ServerConfig struct {
 	// PoolMode controls how upstream connections are leased.
 	// Supported values: "session", "transaction".
 	// Default: "session".
-	PoolMode string `mapstructure:"pool_mode"`
+	PoolMode PoolMode `mapstructure:"pool_mode"`
 }
+
+type PoolMode string
+
+const (
+	PoolModeSession     PoolMode = "session"
+	PoolModeTransaction PoolMode = "transaction"
+)

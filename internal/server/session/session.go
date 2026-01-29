@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/grunyas/grunyas/config"
 	"github.com/grunyas/grunyas/internal/server/messaging"
 	"github.com/grunyas/grunyas/internal/server/types"
 	"github.com/jackc/pgx/v5/pgproto3"
@@ -23,6 +24,7 @@ type Session struct {
 
 	downstream types.DownstreamClientInterface
 	upstream   types.UpstreamClientInterface
+	poolMode   config.PoolMode
 
 	upstreamCh    chan pgproto3.BackendMessage  // delivers upstream messages to the main loop
 	upstreamAck   chan struct{}                 // ack: main loop has finished with the upstream message buffer
@@ -39,6 +41,12 @@ type Session struct {
 	srv          types.ProxyInterface
 	startMu      sync.Mutex
 	wg           sync.WaitGroup
+
+	upstreamCtx    context.Context
+	upstreamCancel context.CancelFunc
+	upstreamDone   chan struct{}
+
+	releaseCh chan struct{}
 }
 
 var globalSessionID atomic.Uint64
@@ -64,6 +72,7 @@ func Initialize(srv types.ProxyInterface, downstream types.DownstreamClientInter
 		srv:           srv,
 		upstreamCh:    make(chan pgproto3.BackendMessage),
 		upstreamAck:   make(chan struct{}),
+		releaseCh:     make(chan struct{}, 1),
 	}
 
 	s.lastActive.Store(time.Now())
@@ -76,6 +85,7 @@ func Initialize(srv types.ProxyInterface, downstream types.DownstreamClientInter
 // and processes messages from the client until the connection is closed.
 func (sess *Session) Run() {
 	defer sess.Close()
+	defer sess.releaseUpstream()
 
 	// Handle initial connection sequence (SSL and Authentication)
 	user, password, err := sess.downstream.Startup()
@@ -84,8 +94,7 @@ func (sess *Session) Run() {
 		return
 	}
 
-	upstream, err := sess.srv.Authenticate(user, password)
-	if err != nil {
+	if err := sess.srv.AuthenticateUser(user, password); err != nil {
 		code := "28P01" // Default: invalid_password
 		if perr, ok := err.(*types.ProxyError); ok {
 			code = perr.Code
@@ -98,7 +107,22 @@ func (sess *Session) Run() {
 
 		return
 	}
-	sess.upstream = upstream
+
+	sess.poolMode = sess.srv.GetConfig().ServerConfig.PoolMode
+
+	if sess.poolMode == config.PoolModeSession {
+		if err := sess.acquireUpstream(); err != nil {
+			code := "53300"
+			if perr, ok := err.(*types.ProxyError); ok {
+				code = perr.Code
+			}
+			sess.log.Info("connection setup failed", zap.String("user", user), zap.String("code", code), zap.Error(err))
+			if err := sess.CloseWithError("FATAL", code, err.Error()); err != nil {
+				sess.log.Warn("failed to close connection", zap.Error(err))
+			}
+			return
+		}
+	}
 
 	if err := sess.downstream.Send(&pgproto3.AuthenticationOk{}); err != nil {
 		sess.log.Warn("failed to send AuthenticationOk", zap.Error(err))
@@ -120,7 +144,10 @@ func (sess *Session) Run() {
 
 	sess.loopsStarted = true
 
-	sess.wg.Go(sess.upstreamReadLoop)
+	if sess.upstream != nil {
+		upstream := sess.upstream
+		sess.wg.Go(func() { sess.upstreamReadLoop(sess.upstreamCtx, upstream) })
+	}
 	sess.wg.Go(sess.downstreamReadLoop)
 
 	sess.startMu.Unlock()
@@ -128,12 +155,7 @@ func (sess *Session) Run() {
 	sess.log.Debug("session run loop started")
 	for {
 		select {
-		case msg, ok := <-sess.upstreamCh:
-			if !ok {
-				sess.log.Info("upstream connection closed")
-				return
-			}
-
+		case msg := <-sess.upstreamCh:
 			sess.lastActive.Store(time.Now())
 			sess.log.Debug("upstream message received", zap.Any("message", msg))
 
@@ -142,31 +164,52 @@ func (sess *Session) Run() {
 				return
 			}
 
-			// Signal read loop that buffer can be reused
-			select {
-			case sess.upstreamAck <- struct{}{}:
-			case <-sess.ctx.Done():
-				return
+			shouldDetach := false
+			if sess.poolMode == config.PoolModeTransaction {
+				if rfq, ok := msg.(*pgproto3.ReadyForQuery); ok && rfq.TxStatus == 'I' {
+					shouldDetach = true
+				}
+			}
+
+			if !shouldDetach {
+				// Signal read loop that buffer can be reused
+				select {
+				case sess.upstreamAck <- struct{}{}:
+				case <-sess.ctx.Done():
+					return
+				}
+			} else {
+				sess.releaseUpstream()
 			}
 
 		case msg, ok := <-sess.downstreamCh:
 			if !ok {
-				sess.log.Info("downstream connection closed")
+				sess.log.Debug("downstream channel closed")
 				return
 			}
 
 			sess.lastActive.Store(time.Now())
+
 			if _, ok := msg.(*pgproto3.Terminate); ok {
 				sess.log.Info("client terminated session")
 				return
 			}
 
-			if err := messaging.Process(sess.ctx, msg, sess.upstream, sess.downstream, sess.log); err != nil {
-				sess.log.Error("error processing message", zap.Error(err))
+			sess.log.Debug("downstream message received", zap.Any("message", msg))
+
+			if err := sess.acquireUpstream(); err != nil {
+				sess.log.Error("failed to acquire upstream", zap.Error(err))
 				return
 			}
 
-			sess.log.Debug("downstream message received", zap.Any("message", msg))
+			switchMode, err := messaging.Process(sess.ctx, msg, sess.upstream, sess.log)
+			if err != nil {
+				sess.log.Error("error processing message", zap.Error(err))
+				return
+			}
+			if switchMode {
+				sess.switchToSessionMode("session state detected")
+			}
 
 			// Signal read loop that buffer can be reused
 			select {
@@ -177,6 +220,9 @@ func (sess *Session) Run() {
 
 		case <-sess.errCh:
 			return
+
+		case <-sess.releaseCh:
+			sess.releaseUpstream()
 
 		case <-sess.ctx.Done():
 			sess.log.Info("session context closed")
@@ -207,6 +253,11 @@ func (sess *Session) LastActive() time.Time {
 // It is safe to call Close multiple times.
 func (sess *Session) Close() {
 	sess.closeOnce.Do(func() {
+		select {
+		case sess.releaseCh <- struct{}{}:
+		default:
+		}
+
 		sess.log.Debug("cancelling session context")
 		sess.cancel()
 
@@ -221,20 +272,6 @@ func (sess *Session) Close() {
 
 		if started {
 			sess.wg.Wait()
-		}
-
-		if sess.upstream != nil {
-			sess.log.Info("releasing connection back to pool")
-			err := sess.upstream.Release()
-			if err != nil {
-				sess.log.Error("failed to release connection", zap.Error(err))
-
-				sess.log.Info("killing connection")
-				err := sess.upstream.Kill()
-				if err != nil {
-					sess.log.Error("failed to kill connection", zap.Error(err))
-				}
-			}
 		}
 	})
 }
@@ -268,14 +305,74 @@ func (sess *Session) CloseWithError(severity, code, message string) error {
 	return nil
 }
 
-// upstreamReadLoop reads messages from the upstream connection (backend) and sends them to the session's upstream channel.
-func (sess *Session) upstreamReadLoop() {
-	defer close(sess.upstreamCh)
+func (sess *Session) acquireUpstream() error {
+	if sess.upstream != nil {
+		return nil
+	}
+	upstream, err := sess.srv.AcquireUpstream()
+	if err != nil {
+		if perr, ok := err.(*types.ProxyError); ok {
+			return perr
+		}
+		return &types.ProxyError{Code: "53300", Message: "connection pool exhausted, please try again later"}
+	}
 
+	upstreamCtx, upstreamCancel := context.WithCancel(sess.ctx)
+	sess.upstream = upstream
+	sess.upstreamCtx = upstreamCtx
+	sess.upstreamCancel = upstreamCancel
+	sess.upstreamDone = make(chan struct{})
+
+	sess.wg.Go(func() {
+		sess.upstreamReadLoop(upstreamCtx, upstream)
+		close(sess.upstreamDone)
+	})
+
+	return nil
+}
+
+func (sess *Session) releaseUpstream() {
+	upstream := sess.upstream
+	cancel := sess.upstreamCancel
+	done := sess.upstreamDone
+	if upstream == nil {
+		return
+	}
+	sess.upstream = nil
+	sess.upstreamCancel = nil
+	sess.upstreamCtx = nil
+	sess.upstreamDone = nil
+
+	if cancel != nil {
+		cancel()
+	}
+	if done != nil {
+		<-done
+	}
+
+	sess.log.Info("releasing connection back to pool")
+	if err := upstream.Release(); err != nil {
+		sess.log.Error("failed to release connection", zap.Error(err))
+		sess.log.Info("killing connection")
+		if err := upstream.Kill(); err != nil {
+			sess.log.Error("failed to kill connection", zap.Error(err))
+		}
+	}
+}
+
+func (sess *Session) switchToSessionMode(reason string) {
+	if sess.poolMode == config.PoolModeSession {
+		return
+	}
+	sess.poolMode = config.PoolModeSession
+	sess.log.Info("switching to session mode", zap.String("reason", reason))
+}
+
+func (sess *Session) upstreamReadLoop(ctx context.Context, upstream types.UpstreamClientInterface) {
 	for {
-		msg, err := sess.upstream.Receive(sess.ctx)
+		msg, err := upstream.Receive(ctx)
 		if err != nil {
-			if sess.ctx.Err() == nil {
+			if ctx.Err() == nil && sess.ctx.Err() == nil {
 				sess.log.Error("upstream receive error", zap.Error(err))
 				select {
 				case sess.errCh <- err:
@@ -288,14 +385,14 @@ func (sess *Session) upstreamReadLoop() {
 
 		select {
 		case sess.upstreamCh <- msg:
-		case <-sess.ctx.Done():
+		case <-ctx.Done():
 			return
 		}
 
 		// Wait for main loop to signal it's done with the buffer
 		select {
 		case <-sess.upstreamAck:
-		case <-sess.ctx.Done():
+		case <-ctx.Done():
 			return
 		}
 	}
