@@ -144,10 +144,6 @@ func (sess *Session) Run() {
 
 	sess.loopsStarted = true
 
-	if sess.upstream != nil {
-		upstream := sess.upstream
-		sess.wg.Go(func() { sess.upstreamReadLoop(sess.upstreamCtx, upstream) })
-	}
 	sess.wg.Go(sess.downstreamReadLoop)
 
 	sess.startMu.Unlock()
@@ -198,7 +194,14 @@ func (sess *Session) Run() {
 			sess.log.Debug("downstream message received", zap.Any("message", msg))
 
 			if err := sess.acquireUpstream(); err != nil {
-				sess.log.Error("failed to acquire upstream", zap.Error(err))
+				code := "53300"
+				if perr, ok := err.(*types.ProxyError); ok {
+					code = perr.Code
+				}
+				sess.log.Info("failed to acquire upstream", zap.String("code", code), zap.Error(err))
+				if err := sess.CloseWithError("FATAL", code, err.Error()); err != nil {
+					sess.log.Warn("failed to close connection", zap.Error(err))
+				}
 				return
 			}
 
@@ -321,11 +324,12 @@ func (sess *Session) acquireUpstream() error {
 	sess.upstream = upstream
 	sess.upstreamCtx = upstreamCtx
 	sess.upstreamCancel = upstreamCancel
-	sess.upstreamDone = make(chan struct{})
+	done := make(chan struct{})
+	sess.upstreamDone = done
 
 	sess.wg.Go(func() {
 		sess.upstreamReadLoop(upstreamCtx, upstream)
-		close(sess.upstreamDone)
+		close(done)
 	})
 
 	return nil
