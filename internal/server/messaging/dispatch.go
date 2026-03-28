@@ -3,33 +3,34 @@ package messaging
 import (
 	"context"
 
-	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/grunyas/grunyas/internal/server/types"
+	"github.com/jackc/pgx/v5/pgproto3"
 	"go.uber.org/zap"
 )
 
 // Process handles a single protocol message received from the client.
 // Terminate messages must be handled by the session manager.
-func Process(ctx context.Context, msg pgproto3.FrontendMessage, upstream types.UpstreamClientInterface, downstream types.DownstreamClientInterface, logger *zap.Logger) error {
+// It returns true when the message requires session-level pooling semantics.
+func Process(ctx context.Context, msg pgproto3.FrontendMessage, upstream types.UpstreamClientInterface, logger *zap.Logger) (bool, error) {
 	switch m := msg.(type) {
 	case *pgproto3.Query:
-		return ProcessSimpleQuery(m, upstream)
+		return queryUsesSessionState(m.String), ProcessSimpleQuery(m, upstream)
 	case *pgproto3.Parse:
-		return ProcessParse(m, upstream)
+		return true, ProcessParse(m, upstream)
 	case *pgproto3.Bind:
-		return ProcessBind(m, upstream)
+		return true, ProcessBind(m, upstream)
 	case *pgproto3.Describe:
-		return ProcessDescribe(m, upstream)
+		return true, ProcessDescribe(m, upstream)
 	case *pgproto3.Execute:
-		return ProcessExecute(m, upstream)
+		return true, ProcessExecute(m, upstream)
 	case *pgproto3.Sync:
-		return ProcessSync(m, upstream)
+		return false, ProcessSync(m, upstream)
 	case *pgproto3.Flush:
-		return ProcessFlush(m, upstream)
+		return false, ProcessFlush(m, upstream)
 	case *pgproto3.Close:
-		return ProcessClose(m, upstream)
+		return false, ProcessClose(m, upstream)
 	default:
 		logger.Warn("unsupported message type", zap.Any("message", m))
-		return upstream.Send(m)
+		return false, upstream.Send(m)
 	}
 }

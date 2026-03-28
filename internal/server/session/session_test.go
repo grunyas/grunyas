@@ -3,6 +3,8 @@ package session
 import (
 	"context"
 	"net"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,10 +16,11 @@ import (
 )
 
 type mockProxyServer struct {
-	ctx      context.Context
-	log      *zap.Logger
-	cfg      *config.Config
-	upstream *mockUpstream
+	ctx         context.Context
+	log         *zap.Logger
+	cfg         *config.Config
+	upstream    *mockUpstream
+	acquireFunc func() (types.UpstreamClientInterface, error)
 }
 
 func (m *mockProxyServer) GetContext() context.Context {
@@ -36,7 +39,14 @@ func (m *mockProxyServer) PoolStats() types.PoolStats {
 	return types.PoolStats{}
 }
 
-func (m *mockProxyServer) Authenticate(user, password string) (types.UpstreamClientInterface, error) {
+func (m *mockProxyServer) AuthenticateUser(user, password string) error {
+	return nil
+}
+
+func (m *mockProxyServer) AcquireUpstream() (types.UpstreamClientInterface, error) {
+	if m.acquireFunc != nil {
+		return m.acquireFunc()
+	}
 	if m.upstream == nil {
 		return &mockUpstream{}, nil
 	}
@@ -119,6 +129,16 @@ func (m *mockResultReader) Close() (pgproto3.CommandComplete, error) {
 func startSession(t *testing.T, parent context.Context) (*Session, net.Conn, <-chan struct{}, func(), *mockUpstream) {
 	t.Helper()
 
+	defaultCfg := config.Default()
+	return startSessionWithConfig(t, parent, defaultCfg, nil, nil)
+}
+
+// startSessionWithConfig spins up a Session with a connected TCP loopback pair and returns
+// the session, the client side of the connection, a done channel that closes
+// when Run exits, a cleanup function, and the mock upstream.
+func startSessionWithConfig(t *testing.T, parent context.Context, cfg config.Config, upstream *mockUpstream, acquireFunc func() (types.UpstreamClientInterface, error)) (*Session, net.Conn, <-chan struct{}, func(), *mockUpstream) {
+	t.Helper()
+
 	// Create a TCP listener on loopback
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -145,16 +165,21 @@ func startSession(t *testing.T, parent context.Context) (*Session, net.Conn, <-c
 	serverConn := <-serverConnCh
 	_ = listener.Close()
 
-	defaultCfg := config.Default()
-	mockUpstream := &mockUpstream{
-		txStatus:  'I',
-		responses: make(chan pgproto3.BackendMessage, 64),
+	if upstream == nil {
+		upstream = &mockUpstream{}
+	}
+	if upstream.txStatus == 0 {
+		upstream.txStatus = 'I'
+	}
+	if upstream.responses == nil {
+		upstream.responses = make(chan pgproto3.BackendMessage, 64)
 	}
 	mockSrv := &mockProxyServer{
-		ctx:      parent,
-		log:      zap.NewNop(),
-		cfg:      &defaultCfg,
-		upstream: mockUpstream,
+		ctx:         parent,
+		log:         zap.NewNop(),
+		cfg:         &cfg,
+		upstream:    upstream,
+		acquireFunc: acquireFunc,
 	}
 
 	down := downstream_client.Initialize(serverConn, nil, false, zap.NewNop())
@@ -176,7 +201,7 @@ func startSession(t *testing.T, parent context.Context) (*Session, net.Conn, <-c
 	// Small delay to ensure session's read loops are fully running
 	time.Sleep(10 * time.Millisecond)
 
-	return sess, clientConn, done, cleanup, mockUpstream
+	return sess, clientConn, done, cleanup, upstream
 }
 
 func waitDone(t *testing.T, done <-chan struct{}) {
@@ -186,6 +211,25 @@ func waitDone(t *testing.T, done <-chan struct{}) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatalf("session did not finish in time")
+	}
+}
+
+func waitForCount(t *testing.T, counter *atomic.Int32, want int32) {
+	t.Helper()
+
+	deadline := time.After(2 * time.Second)
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		if counter.Load() >= want {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timeout waiting for count %d (got %d)", want, counter.Load())
+		case <-ticker.C:
+		}
 	}
 }
 
@@ -615,5 +659,168 @@ func TestSessionHandlesDescribeStatement(t *testing.T) {
 	}
 
 	_ = clientConn.Close()
+	waitDone(t, done)
+}
+
+func TestSessionTransactionPoolingAcquireReleasePerQuery(t *testing.T) {
+	parentCtx := t.Context()
+
+	cfg := config.Default()
+	cfg.ServerConfig.PoolMode = config.PoolModeTransaction
+
+	var acquireCount atomic.Int32
+	var releaseCount atomic.Int32
+
+	upstream := &mockUpstream{
+		txStatus:  'I',
+		responses: make(chan pgproto3.BackendMessage, 64),
+		releaseFunc: func() {
+			releaseCount.Add(1)
+		},
+	}
+
+	acquireFunc := func() (types.UpstreamClientInterface, error) {
+		acquireCount.Add(1)
+		return upstream, nil
+	}
+
+	_, clientConn, done, cleanup, _ := startSessionWithConfig(t, parentCtx, cfg, upstream, acquireFunc)
+	defer cleanup()
+
+	frontend := pgproto3.NewFrontend(clientConn, clientConn)
+
+	upstream.enqueue(
+		&pgproto3.CommandComplete{CommandTag: []byte("OK1")},
+		&pgproto3.ReadyForQuery{TxStatus: 'I'},
+	)
+
+	frontend.Send(&pgproto3.Query{String: "select 1"})
+	if err := frontend.Flush(); err != nil {
+		t.Fatalf("failed to flush query 1: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		if _, err := frontend.Receive(); err != nil {
+			t.Fatalf("failed to receive query 1 response %d: %v", i, err)
+		}
+	}
+
+	waitForCount(t, &releaseCount, 1)
+
+	upstream.enqueue(
+		&pgproto3.CommandComplete{CommandTag: []byte("OK2")},
+		&pgproto3.ReadyForQuery{TxStatus: 'I'},
+	)
+
+	frontend.Send(&pgproto3.Query{String: "select 2"})
+	if err := frontend.Flush(); err != nil {
+		t.Fatalf("failed to flush query 2: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		if _, err := frontend.Receive(); err != nil {
+			t.Fatalf("failed to receive query 2 response %d: %v", i, err)
+		}
+	}
+
+	waitForCount(t, &releaseCount, 2)
+
+	if acquireCount.Load() != 2 {
+		t.Fatalf("expected 2 acquisitions, got %d", acquireCount.Load())
+	}
+
+	_ = clientConn.Close()
+	waitDone(t, done)
+}
+
+func TestSessionTransactionPoolingSwitchesToSessionOnSessionState(t *testing.T) {
+	parentCtx := t.Context()
+
+	cfg := config.Default()
+	cfg.ServerConfig.PoolMode = config.PoolModeTransaction
+
+	var releaseCount atomic.Int32
+
+	upstream := &mockUpstream{
+		txStatus:  'I',
+		responses: make(chan pgproto3.BackendMessage, 64),
+		releaseFunc: func() {
+			releaseCount.Add(1)
+		},
+	}
+
+	sess, clientConn, done, cleanup, _ := startSessionWithConfig(t, parentCtx, cfg, upstream, func() (types.UpstreamClientInterface, error) {
+		return upstream, nil
+	})
+	defer cleanup()
+
+	frontend := pgproto3.NewFrontend(clientConn, clientConn)
+
+	upstream.enqueue(
+		&pgproto3.CommandComplete{CommandTag: []byte("SET")},
+		&pgproto3.ReadyForQuery{TxStatus: 'I'},
+	)
+
+	frontend.Send(&pgproto3.Query{String: "SET search_path TO public"})
+	if err := frontend.Flush(); err != nil {
+		t.Fatalf("failed to flush query: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		if _, err := frontend.Receive(); err != nil {
+			t.Fatalf("failed to receive response %d: %v", i, err)
+		}
+	}
+
+	if sess.poolMode != config.PoolModeSession {
+		t.Fatalf("expected session mode after session-state query, got %s", sess.poolMode)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	if releaseCount.Load() != 0 {
+		t.Fatalf("expected no release after switching to session mode, got %d", releaseCount.Load())
+	}
+
+	_ = clientConn.Close()
+	waitDone(t, done)
+}
+
+func TestSessionTransactionPoolingAcquireFailureSendsFatal(t *testing.T) {
+	parentCtx := t.Context()
+
+	cfg := config.Default()
+	cfg.ServerConfig.PoolMode = config.PoolModeTransaction
+
+	_, clientConn, done, cleanup, _ := startSessionWithConfig(t, parentCtx, cfg, nil, func() (types.UpstreamClientInterface, error) {
+		return nil, types.ErrPoolExhausted
+	})
+	defer cleanup()
+
+	frontend := pgproto3.NewFrontend(clientConn, clientConn)
+
+	frontend.Send(&pgproto3.Query{String: "select 1"})
+	if err := frontend.Flush(); err != nil {
+		t.Fatalf("failed to flush query: %v", err)
+	}
+
+	msg, err := frontend.Receive()
+	if err != nil {
+		t.Fatalf("failed to receive error response: %v", err)
+	}
+
+	errResp, ok := msg.(*pgproto3.ErrorResponse)
+	if !ok {
+		t.Fatalf("expected ErrorResponse, got %T", msg)
+	}
+	if errResp.Severity != "FATAL" {
+		t.Fatalf("expected FATAL severity, got %s", errResp.Severity)
+	}
+	if errResp.Code != "53300" {
+		t.Fatalf("expected code 53300, got %s", errResp.Code)
+	}
+	if !strings.Contains(errResp.Message, "connection pool exhausted") {
+		t.Fatalf("unexpected error message: %s", errResp.Message)
+	}
+
 	waitDone(t, done)
 }

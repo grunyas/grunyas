@@ -35,4 +35,16 @@ type ServerConfig struct {
 	// Supported values: "never", "optional", "mandatory".
 	// Default: "never".
 	SSLMode string `mapstructure:"ssl_mode"`
+
+	// PoolMode controls how upstream connections are leased.
+	// Supported values: "session", "transaction".
+	// Default: "session".
+	PoolMode PoolMode `mapstructure:"pool_mode"`
 }
+
+type PoolMode string
+
+const (
+	PoolModeSession     PoolMode = "session"
+	PoolModeTransaction PoolMode = "transaction"
+)

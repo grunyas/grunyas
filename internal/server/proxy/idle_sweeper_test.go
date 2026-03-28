@@ -153,6 +153,10 @@ func (m *mockProxyServer) PoolStats() types.PoolStats {
 	return types.PoolStats{}
 }
 
-func (m *mockProxyServer) Authenticate(user, password string) (types.UpstreamClientInterface, error) {
+func (m *mockProxyServer) AuthenticateUser(user, password string) error {
+	return nil
+}
+
+func (m *mockProxyServer) AcquireUpstream() (types.UpstreamClientInterface, error) {
 	return &mockUpstream{}, nil
 }
