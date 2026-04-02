@@ -10,6 +10,20 @@ import (
 	"go.uber.org/zap"
 )
 
+// AuthMethod represents the type of authentication mechanism used by the proxy.
+type AuthMethod int
+
+const (
+	AuthPlain       AuthMethod = iota // Cleartext password
+	AuthMD5                           // MD5 hashed password
+	AuthScramSHA256                   // SCRAM-SHA-256
+)
+
+// SCRAMSession represents a single SCRAM-SHA-256 authentication exchange.
+type SCRAMSession interface {
+	Step(clientMsg string) (string, error)
+}
+
 // ProxyInterface defines the interface for the main proxy server functionality
 // exposed to other components like sessions.
 // It allows access to shared resources such as the connection pool, context, and logger.
@@ -26,8 +40,17 @@ type ProxyInterface interface {
 	// PoolStats returns the current statistics of the database connection pool.
 	PoolStats() PoolStats
 
-	// AuthenticateUser validates the user credentials.
-	AuthenticateUser(user, password string) error
+	// GetAuthMethod returns the configured authentication method.
+	GetAuthMethod() AuthMethod
+
+	// Authenticate validates credentials using cleartext comparison.
+	Authenticate(user, password string) error
+
+	// AuthenticateMD5 validates MD5-hashed credentials.
+	AuthenticateMD5(user, clientHash string, salt [4]byte) error
+
+	// NewSCRAMSession creates a new SCRAM-SHA-256 server conversation.
+	NewSCRAMSession() (SCRAMSession, error)
 
 	// AcquireUpstream obtains a connection from the pool.
 	AcquireUpstream() (UpstreamClientInterface, error)
@@ -92,8 +115,10 @@ type ResultReader interface {
 // DownstreamClientInterface defines the interface for the downstream client connection.
 type DownstreamClientInterface interface {
 	// Startup handles the initial connection sequence including SSL negotiation and authentication.
-	// It returns the username and password provided by the client.
-	Startup() (string, string, error)
+	// The auth method determines what challenge is sent to the client.
+	// For AuthPlain and AuthMD5, it returns (username, password/hash, nil).
+	// For AuthScramSHA256, it returns (username, "", nil) — the SASL exchange happens separately.
+	Startup(authMethod AuthMethod) (string, string, error)
 
 	// Handshake performs the post-authentication initialization (parameter status, etc).
 	Handshake() error

@@ -19,14 +19,16 @@ import (
 type PoolManager struct {
 	ctx context.Context
 
-	logger *zap.Logger
-	pool   *pgxpool.Pool
+	logger     *zap.Logger
+	pool       *pgxpool.Pool
+	discardAll bool // true only in session mode
 }
 
 func Initialize(prx types.ProxyInterface) *PoolManager {
 	ctx := prx.GetContext()
 	cfg := prx.GetConfig().BackendConfig
 	logger := prx.GetLogger()
+	discardAll := prx.GetConfig().ServerConfig.PoolMode == config.PoolModeSession
 
 	// Initialize connection pool
 	poolConfig, err := pgxpool.ParseConfig(DatabaseDSN(cfg))
@@ -53,9 +55,10 @@ func Initialize(prx types.ProxyInterface) *PoolManager {
 	}
 
 	return &PoolManager{
-		ctx:    ctx,
-		logger: logger,
-		pool:   pool,
+		ctx:        ctx,
+		logger:     logger,
+		pool:       pool,
+		discardAll: discardAll,
 	}
 }
 
@@ -66,10 +69,26 @@ func (pm *PoolManager) AcquireDbConnection() (types.UpstreamClientInterface, err
 
 	sessionClient, err := pm.pool.Acquire(acquireCtx)
 	if err != nil {
+		s := pm.pool.Stat()
+		pm.logger.Warn("pool acquire failed",
+			zap.Error(err),
+			zap.Int32("total_conns", s.TotalConns()),
+			zap.Int32("acquired_conns", s.AcquiredConns()),
+			zap.Int32("idle_conns", s.IdleConns()),
+			zap.Int32("max_conns", s.MaxConns()),
+		)
 		return nil, err
 	}
 
-	return upstream_client.Initialize(sessionClient), nil
+	s := pm.pool.Stat()
+	pm.logger.Debug("pool acquire succeeded",
+		zap.Int32("total_conns", s.TotalConns()),
+		zap.Int32("acquired_conns", s.AcquiredConns()),
+		zap.Int32("idle_conns", s.IdleConns()),
+		zap.Int32("max_conns", s.MaxConns()),
+	)
+
+	return upstream_client.Initialize(sessionClient, pm.discardAll), nil
 }
 
 // PoolStats returns the current statistics of the database connection pool.

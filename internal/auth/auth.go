@@ -15,6 +15,8 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/grunyas/grunyas/config"
+	"github.com/grunyas/grunyas/internal/server/downstream_client"
+	"github.com/grunyas/grunyas/internal/server/types"
 )
 
 // AuthMethod represents the type of authentication mechanism.
@@ -82,33 +84,49 @@ func Initialize(cfg config.AuthConfig, log *zap.Logger) (*Authenticator, error) 
 	return auth, nil
 }
 
-// AuthenticateUser validates the provided credentials against the configured ones.
-func (a *Authenticator) AuthenticateUser(user, password string) error {
+// Method returns the configured authentication method as a types.AuthMethod.
+func (a *Authenticator) Method() types.AuthMethod {
+	switch a.cred.Method {
+	case AuthMD5:
+		return types.AuthMD5
+	case AuthScramSHA256:
+		return types.AuthScramSHA256
+	default:
+		return types.AuthPlain
+	}
+}
+
+// Authenticate validates cleartext credentials.
+func (a *Authenticator) Authenticate(user, password string) error {
 	if user != a.cred.Username {
 		return fmt.Errorf("role \"%s\" does not exist", user)
 	}
-
-	switch a.cred.Method {
-	case AuthPlain:
-		if password != a.cred.Password {
-			return fmt.Errorf("invalid password")
-		}
-	case AuthMD5:
-		// Compute hash of the provided plain password to compare with stored MD5
-		// Password from client is plain since Startup() uses CleartextPassword request.
-		// Note: we'll simply check if the plain password matches the config password for now
-		// or implement proper hash comparison if the config contains hashes.
-		if password != a.cred.Password {
-			return fmt.Errorf("invalid password")
-		}
-	case AuthScramSHA256:
-		// Similar to MD5, if we get a plain password, we compare it.
-		if password != a.cred.Password {
-			return fmt.Errorf("invalid password")
-		}
+	if password != a.cred.Password {
+		return fmt.Errorf("invalid password")
 	}
-
 	return nil
+}
+
+// AuthenticateMD5 validates MD5-hashed credentials from the client.
+// clientHash is the "md5..." string sent by the client. salt is the random salt we sent.
+func (a *Authenticator) AuthenticateMD5(user, clientHash string, salt [4]byte) error {
+	if user != a.cred.Username {
+		return fmt.Errorf("role \"%s\" does not exist", user)
+	}
+	expected := downstream_client.ComputeMD5Password(user, a.cred.Password, salt)
+	if clientHash != expected {
+		return fmt.Errorf("invalid password")
+	}
+	return nil
+}
+
+// NewSCRAMSession creates a new SCRAM-SHA-256 server conversation.
+func (a *Authenticator) NewSCRAMSession() (*ScramSession, error) {
+	if a.scram == nil {
+		return nil, fmt.Errorf("SCRAM not configured")
+	}
+	conv := a.scram.NewConversation()
+	return &ScramSession{conv: conv}, nil
 }
 func scramStored(cred Credential) (scram.StoredCredentials, error) {
 	if strings.HasPrefix(strings.ToUpper(cred.Password), "SCRAM-SHA-256$") {

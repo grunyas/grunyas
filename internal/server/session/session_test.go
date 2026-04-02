@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"strings"
 	"sync/atomic"
@@ -39,8 +40,20 @@ func (m *mockProxyServer) PoolStats() types.PoolStats {
 	return types.PoolStats{}
 }
 
-func (m *mockProxyServer) AuthenticateUser(user, password string) error {
+func (m *mockProxyServer) GetAuthMethod() types.AuthMethod {
+	return types.AuthPlain
+}
+
+func (m *mockProxyServer) Authenticate(user, password string) error {
 	return nil
+}
+
+func (m *mockProxyServer) AuthenticateMD5(user, clientHash string, salt [4]byte) error {
+	return nil
+}
+
+func (m *mockProxyServer) NewSCRAMSession() (types.SCRAMSession, error) {
+	return nil, fmt.Errorf("SCRAM not configured in mock")
 }
 
 func (m *mockProxyServer) AcquireUpstream() (types.UpstreamClientInterface, error) {

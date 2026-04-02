@@ -1,0 +1,7 @@
+*/results/*.json
+*/node_modules/
+*/__pycache__/
+**/*.pyc
+**/*.class
+go/simulator
+typescript/dist/

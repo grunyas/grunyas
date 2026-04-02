@@ -16,13 +16,16 @@ func Process(ctx context.Context, msg pgproto3.FrontendMessage, upstream types.U
 	case *pgproto3.Query:
 		return queryUsesSessionState(m.String), ProcessSimpleQuery(m, upstream)
 	case *pgproto3.Parse:
-		return true, ProcessParse(m, upstream)
+		// Extended-protocol Parse messages (named or unnamed) are NOT SQL PREPARE — they
+		// don't create persistent session state. SQL PREPARE arrives as a Query message.
+		// Never pin for Parse.
+		return false, ProcessParse(m, upstream)
 	case *pgproto3.Bind:
-		return true, ProcessBind(m, upstream)
+		return false, ProcessBind(m, upstream)
 	case *pgproto3.Describe:
-		return true, ProcessDescribe(m, upstream)
+		return false, ProcessDescribe(m, upstream)
 	case *pgproto3.Execute:
-		return true, ProcessExecute(m, upstream)
+		return false, ProcessExecute(m, upstream)
 	case *pgproto3.Sync:
 		return false, ProcessSync(m, upstream)
 	case *pgproto3.Flush:

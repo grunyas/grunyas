@@ -167,12 +167,30 @@ func (prx *Proxy) PoolStats() types.PoolStats {
 	return prx.poolMgr.PoolStats()
 }
 
-// Authenticate validates the provided user credentials and returns an upstream connection if successful.
-func (prx *Proxy) AuthenticateUser(user, password string) error {
-	if err := prx.auth.AuthenticateUser(user, password); err != nil {
+// GetAuthMethod returns the configured authentication method.
+func (prx *Proxy) GetAuthMethod() types.AuthMethod {
+	return prx.auth.Method()
+}
+
+// Authenticate validates cleartext credentials.
+func (prx *Proxy) Authenticate(user, password string) error {
+	if err := prx.auth.Authenticate(user, password); err != nil {
 		return &types.ProxyError{Code: "28P01", Message: err.Error()}
 	}
 	return nil
+}
+
+// AuthenticateMD5 validates MD5-hashed credentials.
+func (prx *Proxy) AuthenticateMD5(user, clientHash string, salt [4]byte) error {
+	if err := prx.auth.AuthenticateMD5(user, clientHash, salt); err != nil {
+		return &types.ProxyError{Code: "28P01", Message: err.Error()}
+	}
+	return nil
+}
+
+// NewSCRAMSession creates a new SCRAM-SHA-256 server conversation.
+func (prx *Proxy) NewSCRAMSession() (types.SCRAMSession, error) {
+	return prx.auth.NewSCRAMSession()
 }
 
 // AcquireUpstream acquires a connection from the database pool.

@@ -1,0 +1,76 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    command: ["postgres", "-c", "max_connections=${PG_MAX_CONN:-50}"]
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: simulator
+    volumes:
+      - ../shared/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    networks: [simulator]
+    deploy:
+      resources:
+        limits:
+          cpus: "${PG_VCPUS:-2}"
+          memory: "${PG_RAM_GB:-2}G"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d simulator"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  grunyas:
+    build:
+      context: ../../
+      dockerfile: benchmark/Dockerfile
+    environment:
+      GRUNYAS_SERVER_LISTEN_ADDR: "0.0.0.0:5711"
+      GRUNYAS_SERVER_POOL_MODE: "${POOL_MODE:-session}"
+      GRUNYAS_SERVER_MAX_SESSIONS: "${CLIENT_MAX_CONNS:-100}"
+      GRUNYAS_AUTH_METHOD: "plain"
+      GRUNYAS_AUTH_USERNAME: "postgres"
+      GRUNYAS_AUTH_PASSWORD: "postgres"
+      GRUNYAS_BACKEND_HOST: "postgres"
+      GRUNYAS_BACKEND_PORT: "5432"
+      GRUNYAS_BACKEND_USER: "postgres"
+      GRUNYAS_BACKEND_PASSWORD: "postgres"
+      GRUNYAS_BACKEND_DATABASE: "simulator"
+      GRUNYAS_BACKEND_POOL_MAX_CONNS: "${BACKEND_MAX_CONNS:-10}"
+      GRUNYAS_BACKEND_POOL_MIN_CONNS: "${BACKEND_MIN_CONNS:-2}"
+      GRUNYAS_LOGGING_LEVEL: "warn"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [simulator]
+    deploy:
+      resources:
+        limits:
+          cpus: "${GRUNYAS_VCPUS:-2}"
+          memory: "${GRUNYAS_RAM_MB:-512}M"
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 5711 || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  simulator:
+    build: .
+    environment:
+      DB_HOST: grunyas
+      DB_PORT: "5711"
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: simulator
+      CONCURRENCY: "${CONCURRENCY:-100}"
+      POOL_MODE: "${POOL_MODE:-session}"
+    depends_on:
+      grunyas:
+        condition: service_healthy
+    volumes:
+      - ./results:/app/results
+    networks: [simulator]
+
+networks:
+  simulator:
+    driver: bridge
