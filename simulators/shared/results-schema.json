@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Grunyas Simulator Results",
+  "type": "object",
+  "required": ["simulator", "timestamp", "config", "runs"],
+  "properties": {
+    "simulator": {
+      "type": "string",
+      "enum": ["go", "java", "python", "typescript"]
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "config": {
+      "type": "object",
+      "required": ["concurrency", "driver"],
+      "properties": {
+        "concurrency": { "type": "integer" },
+        "driver": { "type": "string" }
+      }
+    },
+    "runs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["pool_mode", "scenarios", "summary"],
+        "properties": {
+          "pool_mode": {
+            "type": "string",
+            "enum": ["session", "transaction"]
+          },
+          "scenarios": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["name", "status", "duration_ms", "total_ops", "errors"],
+              "properties": {
+                "name": { "type": "string" },
+                "status": {
+                  "type": "string",
+                  "enum": ["pass", "fail", "partial"]
+                },
+                "duration_ms": { "type": "number" },
+                "total_ops": { "type": "integer" },
+                "ops_per_sec": { "type": "number" },
+                "errors": { "type": "integer" },
+                "latency": {
+                  "type": "object",
+                  "properties": {
+                    "min_ms": { "type": "number" },
+                    "max_ms": { "type": "number" },
+                    "avg_ms": { "type": "number" },
+                    "p50_ms": { "type": "number" },
+                    "p95_ms": { "type": "number" },
+                    "p99_ms": { "type": "number" }
+                  }
+                },
+                "notes": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                }
+              }
+            }
+          },
+          "summary": {
+            "type": "object",
+            "required": ["total_duration_ms", "total_ops", "total_errors", "scenarios_passed", "scenarios_failed"],
+            "properties": {
+              "total_duration_ms": { "type": "number" },
+              "total_ops": { "type": "integer" },
+              "total_errors": { "type": "integer" },
+              "scenarios_passed": { "type": "integer" },
+              "scenarios_failed": { "type": "integer" }
+            }
+          }
+        }
+      }
+    }
+  }
+}
