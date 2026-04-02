@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"testing"
 	"time"
@@ -107,7 +108,7 @@ type mockDownstream struct {
 	backend *pgproto3.Backend
 }
 
-func (m *mockDownstream) Startup() (string, string, error) {
+func (m *mockDownstream) Startup(_ types.AuthMethod) (string, string, error) {
 	return "", "", nil
 }
 
@@ -153,8 +154,20 @@ func (m *mockProxyServer) PoolStats() types.PoolStats {
 	return types.PoolStats{}
 }
 
-func (m *mockProxyServer) AuthenticateUser(user, password string) error {
+func (m *mockProxyServer) GetAuthMethod() types.AuthMethod {
+	return types.AuthPlain
+}
+
+func (m *mockProxyServer) Authenticate(user, password string) error {
 	return nil
+}
+
+func (m *mockProxyServer) AuthenticateMD5(user, clientHash string, salt [4]byte) error {
+	return nil
+}
+
+func (m *mockProxyServer) NewSCRAMSession() (types.SCRAMSession, error) {
+	return nil, fmt.Errorf("SCRAM not configured in mock")
 }
 
 func (m *mockProxyServer) AcquireUpstream() (types.UpstreamClientInterface, error) {

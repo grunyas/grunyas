@@ -2,7 +2,6 @@ package upstream_client
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -11,12 +10,14 @@ import (
 )
 
 type SessionClient struct {
-	conn *pgxpool.Conn
+	conn       *pgxpool.Conn
+	discardAll bool // run DISCARD ALL on release; false for transaction mode
 }
 
-func Initialize(conn *pgxpool.Conn) *SessionClient {
+func Initialize(conn *pgxpool.Conn, discardAll bool) *SessionClient {
 	return &SessionClient{
-		conn: conn,
+		conn:       conn,
+		discardAll: discardAll,
 	}
 }
 
@@ -69,20 +70,25 @@ func (s *SessionClient) reset() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Drain any pending messages so we start from a clean protocol boundary.
-	if err := s.drainToReady(ctx); err != nil {
-		return err
+	// Only drain if the connection is not idle — avoids the speculative probe
+	// that can corrupt protocol state on an idle connection.
+	if s.TxStatus() != 'I' {
+		if err := s.drainToReady(ctx); err != nil {
+			return fmt.Errorf("drain pending messages: %w", err)
+		}
 	}
 
-	// If we're not idle, attempt a rollback before discarding state.
+	// If still not idle after draining, attempt a rollback.
 	if s.TxStatus() != 'I' {
 		if err := s.simpleQuery(ctx, "ROLLBACK"); err != nil {
 			return err
 		}
 	}
 
-	if err := s.simpleQuery(ctx, "DISCARD ALL"); err != nil {
-		return err
+	if s.discardAll {
+		if err := s.simpleQuery(ctx, "DISCARD ALL"); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -94,49 +100,40 @@ func (s *SessionClient) simpleQuery(ctx context.Context, query string) error {
 	}
 
 	// Consume response: expect CommandComplete + ReadyForQuery
+	var queryErr error
 	for {
 		msg, err := s.Receive(ctx)
 		if err != nil {
 			return fmt.Errorf("receive %s response: %w", query, err)
 		}
 
-		switch msg.(type) {
+		switch m := msg.(type) {
 		case *pgproto3.ReadyForQuery:
-			return nil
+			return queryErr
 		case *pgproto3.CommandComplete:
 			// Expected, continue to ReadyForQuery
 		case *pgproto3.ErrorResponse:
-			return fmt.Errorf("%s failed", query)
+			queryErr = fmt.Errorf("%s failed: %s %s (%s)", query, m.Severity, m.Code, m.Message)
 		}
 	}
 }
 
-// drainToReady drains any pending backend messages until ReadyForQuery or timeout.
-// If no message is pending, it returns quickly.
+// drainToReady drains pending backend messages until ReadyForQuery.
+// It should only be called when TxStatus indicates there are pending messages
+// (i.e., TxStatus != 'I'). Calling on an idle connection would block.
 func (s *SessionClient) drainToReady(ctx context.Context) error {
-	// Probe quickly for any queued messages to avoid blocking on idle connections.
-	probeCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-
-	msg, err := s.Receive(probeCtx)
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-			return nil
-		}
-		return fmt.Errorf("drain receive: %w", err)
-	}
-
 	for {
-		switch msg.(type) {
+		msg, err := s.Receive(ctx)
+		if err != nil {
+			return fmt.Errorf("drain receive: %w", err)
+		}
+
+		switch m := msg.(type) {
 		case *pgproto3.ReadyForQuery:
 			return nil
 		case *pgproto3.ErrorResponse:
-			return fmt.Errorf("drain failed")
-		}
-
-		msg, err = s.Receive(ctx)
-		if err != nil {
-			return fmt.Errorf("drain receive: %w", err)
+			// ErrorResponse is followed by ReadyForQuery, keep draining.
+			_ = m
 		}
 	}
 }
