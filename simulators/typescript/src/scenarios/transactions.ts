@@ -6,6 +6,8 @@ export async function transactions(config: Config): Promise<RawResult> {
   pool.on("error", () => {}); // suppress unhandled pool-level errors
   let ops = 0, errors = 0;
   const latencies: number[] = [];
+  // Unique per-run prefix prevents duplicate key violations on repeated runs.
+  const runId = Math.floor(Math.random() * 2 ** 32);
 
   const start = Date.now();
   const workers = Array.from({ length: config.concurrency }, (_, i) => (async () => {
@@ -15,7 +17,7 @@ export async function transactions(config: Config): Promise<RawResult> {
       const client = await pool.connect();
       try {
         await client.query("BEGIN");
-        await client.query("INSERT INTO users (name, email, balance) VALUES ($1, $2, $3)", [`tx_user_${i}_${iter}`, `tx_commit_${i}_${iter}@test.com`, 500.0]);
+        await client.query("INSERT INTO users (name, email, balance) VALUES ($1, $2, $3)", [`tx_user_${i}_${iter}`, `tx_${runId}_${i}_${iter}@test.com`, 500.0]);
         await client.query("COMMIT");
       } catch { errors++; try { await client.query("ROLLBACK"); } catch {} }
       finally { client.release(); }

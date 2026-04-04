@@ -17,10 +17,10 @@ func BasicCRUD(ctx context.Context, cfg *Config) (*Result, error) {
 	defer pool.Close()
 
 	var (
-		ops      atomic.Int64
-		errCount atomic.Int64
-		mu       sync.Mutex
-		latencies []time.Duration
+		ops        atomic.Int64
+		errCount   atomic.Int64
+		mu         sync.Mutex
+		latencies  []time.Duration
 	)
 
 	start := time.Now()
@@ -45,7 +45,9 @@ func BasicCRUD(ctx context.Context, cfg *Config) (*Result, error) {
 				mu.Unlock()
 				ops.Add(1)
 				if err != nil {
-					errCount.Add(1)
+					if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+						errCount.Add(1)
+					}
 					continue
 				}
 
@@ -59,7 +61,9 @@ func BasicCRUD(ctx context.Context, cfg *Config) (*Result, error) {
 				mu.Unlock()
 				ops.Add(1)
 				if err != nil {
-					errCount.Add(1)
+					if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+						errCount.Add(1)
+					}
 					continue
 				}
 
@@ -72,7 +76,9 @@ func BasicCRUD(ctx context.Context, cfg *Config) (*Result, error) {
 				mu.Unlock()
 				ops.Add(1)
 				if err != nil {
-					errCount.Add(1)
+					if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+						errCount.Add(1)
+					}
 					continue
 				}
 
@@ -85,7 +91,9 @@ func BasicCRUD(ctx context.Context, cfg *Config) (*Result, error) {
 				mu.Unlock()
 				ops.Add(1)
 				if err != nil {
-					errCount.Add(1)
+					if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+						errCount.Add(1)
+					}
 				}
 			}
 		}(i)

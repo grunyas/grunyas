@@ -7,9 +7,11 @@ import time
 import psycopg
 
 
-async def _worker(conninfo: str, worker_id: int, ops: list, errors: list, latencies: list):
+async def _worker(conninfo: str, worker_id: int, pool_mode: str, ops: list, errors: list, latencies: list):
     rng = random.Random(worker_id)
     async with await psycopg.AsyncConnection.connect(conninfo) as conn:
+        if pool_mode == "transaction":
+            conn.prepare_threshold = None
         for _ in range(20):
             user_id = rng.randint(1, 1000)
 
@@ -41,6 +43,7 @@ async def _worker(conninfo: str, worker_id: int, ops: list, errors: list, latenc
 async def run(config: dict) -> dict:
     conninfo = config["conninfo"]
     concurrency = config["concurrency"]
+    pool_mode = config["pool_mode"]
     ops: list = []
     errors: list = []
     latencies: list = []
@@ -50,7 +53,7 @@ async def run(config: dict) -> dict:
 
     async def bounded(wid):
         async with sem:
-            await _worker(conninfo, wid, ops, errors, latencies)
+            await _worker(conninfo, wid, pool_mode, ops, errors, latencies)
 
     await asyncio.gather(*(bounded(i) for i in range(concurrency)))
     duration = (time.monotonic() - start) * 1000

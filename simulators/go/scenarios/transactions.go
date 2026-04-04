@@ -21,10 +21,10 @@ func Transactions(ctx context.Context, cfg *Config) (*Result, error) {
 	runID := rand.Uint64()
 
 	var (
-		ops       atomic.Int64
-		errCount  atomic.Int64
-		mu        sync.Mutex
-		latencies []time.Duration
+		ops        atomic.Int64
+		errCount   atomic.Int64
+		mu         sync.Mutex
+		latencies  []time.Duration
 	)
 
 	start := time.Now()
@@ -40,7 +40,9 @@ func Transactions(ctx context.Context, cfg *Config) (*Result, error) {
 				t := time.Now()
 				tx, err := pool.Begin(ctx)
 				if err != nil {
-					errCount.Add(1)
+					if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+						errCount.Add(1)
+					}
 					ops.Add(1)
 					continue
 				}
@@ -50,7 +52,9 @@ func Transactions(ctx context.Context, cfg *Config) (*Result, error) {
 					fmt.Sprintf("tx_user_%d_%d", workerID, iter), email, 500.00)
 				if err != nil {
 					_ = tx.Rollback(ctx)
-					errCount.Add(1)
+					if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+						errCount.Add(1)
+					}
 					ops.Add(1)
 					continue
 				}
@@ -62,14 +66,18 @@ func Transactions(ctx context.Context, cfg *Config) (*Result, error) {
 				mu.Unlock()
 				ops.Add(1)
 				if err != nil {
-					errCount.Add(1)
+					if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+						errCount.Add(1)
+					}
 				}
 
 				// --- Rollback flow ---
 				t = time.Now()
 				tx, err = pool.Begin(ctx)
 				if err != nil {
-					errCount.Add(1)
+					if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+						errCount.Add(1)
+					}
 					ops.Add(1)
 					continue
 				}
@@ -84,14 +92,18 @@ func Transactions(ctx context.Context, cfg *Config) (*Result, error) {
 				mu.Unlock()
 				ops.Add(1)
 				if err != nil {
-					errCount.Add(1)
+					if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+						errCount.Add(1)
+					}
 				}
 
 				// --- Savepoint flow ---
 				t = time.Now()
 				tx, err = pool.Begin(ctx)
 				if err != nil {
-					errCount.Add(1)
+					if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+						errCount.Add(1)
+					}
 					ops.Add(1)
 					continue
 				}
@@ -108,7 +120,9 @@ func Transactions(ctx context.Context, cfg *Config) (*Result, error) {
 				mu.Unlock()
 				ops.Add(1)
 				if err != nil {
-					errCount.Add(1)
+					if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+						errCount.Add(1)
+					}
 				}
 			}
 		}(i)

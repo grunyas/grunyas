@@ -6,9 +6,11 @@ import time
 import psycopg
 
 
-async def _worker(conninfo: str, worker_id: int, ops: list, errors: list, latencies: list, pid_results: dict):
+async def _worker(conninfo: str, worker_id: int, pool_mode: str, ops: list, errors: list, latencies: list):
     pids = set()
     async with await psycopg.AsyncConnection.connect(conninfo) as conn:
+        if pool_mode == "transaction":
+            conn.prepare_threshold = None
         await conn.set_autocommit(True)
         for _ in range(10):
             t = time.monotonic()
@@ -21,7 +23,12 @@ async def _worker(conninfo: str, worker_id: int, ops: list, errors: list, latenc
             latencies.append((time.monotonic() - t) * 1000)
             ops.append(1)
 
-    pid_results[worker_id] = len(pids) > 1
+    # In session mode, PID changes are unexpected — count as errors.
+    # In transaction mode, no PID change means multiplexing wasn't observed — count as errors.
+    if pool_mode == "session" and len(pids) > 1:
+        errors.append(1)
+    elif pool_mode == "transaction" and len(pids) <= 1:
+        errors.append(1)
 
 
 async def run(config: dict) -> dict:
@@ -31,28 +38,15 @@ async def run(config: dict) -> dict:
     ops: list = []
     errors: list = []
     latencies: list = []
-    pid_results: dict = {}
 
     start = time.monotonic()
     sem = asyncio.Semaphore(concurrency)
 
     async def bounded(wid):
         async with sem:
-            await _worker(conninfo, wid, ops, errors, latencies, pid_results)
+            await _worker(conninfo, wid, pool_mode, ops, errors, latencies)
 
     await asyncio.gather(*(bounded(i) for i in range(concurrency)))
     duration = (time.monotonic() - start) * 1000
 
-    changed = sum(1 for v in pid_results.values() if v)
-    total = len(pid_results)
-
-    notes = []
-    if pool_mode == "session":
-        if changed > 0:
-            notes.append(f"session mode: {changed}/{total} workers saw PID changes (unexpected)")
-        else:
-            notes.append(f"session mode: all {total} workers maintained same PID (expected)")
-    else:
-        notes.append(f"transaction mode: {changed}/{total} workers saw PID changes")
-
-    return {"total_ops": len(ops), "errors": len(errors), "duration_ms": duration, "latencies": latencies, "notes": notes}
+    return {"total_ops": len(ops), "errors": len(errors), "duration_ms": duration, "latencies": latencies}

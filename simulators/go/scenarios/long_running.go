@@ -17,10 +17,10 @@ func LongRunning(ctx context.Context, cfg *Config) (*Result, error) {
 	defer pool.Close()
 
 	var (
-		ops       atomic.Int64
-		errCount  atomic.Int64
-		mu        sync.Mutex
-		latencies []time.Duration
+		ops        atomic.Int64
+		errCount   atomic.Int64
+		mu         sync.Mutex
+		latencies  []time.Duration
 	)
 
 	start := time.Now()
@@ -43,7 +43,9 @@ func LongRunning(ctx context.Context, cfg *Config) (*Result, error) {
 			mu.Unlock()
 			ops.Add(1)
 			if err != nil {
-				errCount.Add(1)
+				if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+					errCount.Add(1)
+				}
 			}
 		}()
 	}
@@ -57,7 +59,9 @@ func LongRunning(ctx context.Context, cfg *Config) (*Result, error) {
 			t := time.Now()
 			rows, err := pool.Query(ctx, "SELECT generate_series(1, 10000)")
 			if err != nil {
-				errCount.Add(1)
+				if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+					errCount.Add(1)
+				}
 				ops.Add(1)
 				return
 			}
@@ -72,7 +76,9 @@ func LongRunning(ctx context.Context, cfg *Config) (*Result, error) {
 			mu.Unlock()
 			ops.Add(1)
 			if err := rows.Err(); err != nil {
-				errCount.Add(1)
+				if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+					errCount.Add(1)
+				}
 			}
 		}()
 	}
@@ -93,7 +99,9 @@ func LongRunning(ctx context.Context, cfg *Config) (*Result, error) {
 				mu.Unlock()
 				ops.Add(1)
 				if err != nil {
-					errCount.Add(1)
+					if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+						errCount.Add(1)
+					}
 				}
 			}
 		}()

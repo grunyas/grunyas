@@ -88,13 +88,13 @@ func (sess *Session) Run() {
 	defer sess.releaseUpstream()
 
 	// Handle initial connection sequence (SSL and Authentication)
-	user, password, err := sess.downstream.Startup()
+	user, password, err := sess.downstream.Startup(sess.srv.GetAuthMethod())
 	if err != nil {
 		sess.log.Info("client connection startup failed", zap.Error(err))
 		return
 	}
 
-	if err := sess.srv.AuthenticateUser(user, password); err != nil {
+	if err := sess.srv.Authenticate(user, password); err != nil {
 		code := "28P01" // Default: invalid_password
 		if perr, ok := err.(*types.ProxyError); ok {
 			code = perr.Code

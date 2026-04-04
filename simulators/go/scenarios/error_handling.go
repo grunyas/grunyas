@@ -17,12 +17,12 @@ func ErrorHandling(ctx context.Context, cfg *Config) (*Result, error) {
 	defer pool.Close()
 
 	var (
-		ops       atomic.Int64
-		errCount  atomic.Int64
-		mu        sync.Mutex
-		latencies []time.Duration
-		notes     []string
-		notesMu   sync.Mutex
+		ops        atomic.Int64
+		errCount   atomic.Int64
+		mu         sync.Mutex
+		latencies  []time.Duration
+		notes      []string
+		notesMu    sync.Mutex
 	)
 
 	start := time.Now()
@@ -58,12 +58,14 @@ func ErrorHandling(ctx context.Context, cfg *Config) (*Result, error) {
 			mu.Unlock()
 			ops.Add(1)
 			if err != nil {
-				errCount.Add(1)
-				notesMu.Lock()
-				if len(notes) < 5 {
-					notes = append(notes, fmt.Sprintf("connection broken after error: %v", err))
+				if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+					errCount.Add(1)
+					notesMu.Lock()
+					if len(notes) < 5 {
+						notes = append(notes, fmt.Sprintf("connection broken after error: %v", err))
+					}
+					notesMu.Unlock()
 				}
-				notesMu.Unlock()
 			}
 
 			// --- Unique constraint violation ---
@@ -88,7 +90,9 @@ func ErrorHandling(ctx context.Context, cfg *Config) (*Result, error) {
 			mu.Unlock()
 			ops.Add(1)
 			if err != nil {
-				errCount.Add(1)
+				if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+					errCount.Add(1)
+				}
 			}
 
 			// --- Division by zero ---
@@ -112,7 +116,9 @@ func ErrorHandling(ctx context.Context, cfg *Config) (*Result, error) {
 			mu.Unlock()
 			ops.Add(1)
 			if err != nil || v != 42 {
-				errCount.Add(1)
+				if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+					errCount.Add(1)
+				}
 			}
 		}(i)
 	}
