@@ -29,17 +29,15 @@ export async function poolBehavior(config: Config): Promise<RawResult> {
   await Promise.all(tasks);
   await pool.end();
 
-  const changed = pidResults.filter(Boolean).length;
-  const notes: string[] = [];
-  if (config.poolMode === "session") {
-    if (changed > 0) {
-      notes.push(`session mode: ${changed}/${workers} workers saw PID changes (unexpected)`);
-    } else {
-      notes.push(`session mode: all ${workers} workers maintained same PID (expected)`);
+  // In session mode, PID changes are unexpected — count as errors.
+  // In transaction mode, no PID change means multiplexing wasn't observed — count as errors.
+  for (let i = 0; i < workers; i++) {
+    if (config.poolMode === "session" && pidResults[i]) {
+      errors++;
+    } else if (config.poolMode === "transaction" && !pidResults[i]) {
+      errors++;
     }
-  } else {
-    notes.push(`transaction mode: ${changed}/${workers} workers saw PID changes`);
   }
 
-  return { totalOps: ops, errors, durationMs: Date.now() - start, latencies, notes };
+  return { totalOps: ops, errors, durationMs: Date.now() - start, latencies };
 }

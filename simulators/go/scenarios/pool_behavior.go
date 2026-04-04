@@ -30,10 +30,10 @@ func PoolBehavior(ctx context.Context, cfg *Config) (*Result, error) {
 	defer pool.Close()
 
 	var (
-		ops       atomic.Int64
-		errCount  atomic.Int64
-		mu        sync.Mutex
-		latencies []time.Duration
+		ops        atomic.Int64
+		errCount   atomic.Int64
+		mu         sync.Mutex
+		latencies  []time.Duration
 	)
 
 	type pidResult struct {
@@ -56,7 +56,9 @@ func PoolBehavior(ctx context.Context, cfg *Config) (*Result, error) {
 			// Acquire a connection and track PID across multiple queries
 			conn, err := pool.Acquire(ctx)
 			if err != nil {
-				errCount.Add(1)
+				if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+					errCount.Add(1)
+				}
 				ops.Add(1)
 				return
 			}
@@ -75,7 +77,9 @@ func PoolBehavior(ctx context.Context, cfg *Config) (*Result, error) {
 				mu.Unlock()
 				ops.Add(1)
 				if err != nil {
-					errCount.Add(1)
+					if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+						errCount.Add(1)
+					}
 					continue
 				}
 

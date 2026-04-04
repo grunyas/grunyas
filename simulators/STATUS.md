@@ -3,29 +3,23 @@
 Each simulator (Go, Java, Python, TypeScript) runs the same 9 scenarios against Grunyas in both
 session and transaction pool modes, producing a JSON report for comparison.
 
+All four simulators pass all 9 scenarios with 0 errors in both session and transaction mode.
+
 ---
 
 ## Go — complete
-
-The Go simulator was the first to be implemented and the primary focus of debugging work. It now
-passes all scenarios in both modes.
-
-### Results (latest run.sh, CONCURRENCY=20)
 
 | Scenario | Session | Transaction |
 |---|---|---|
 | basic_crud | pass — 0 errors | pass — 0 errors |
 | transactions | pass — 0 errors | pass — 0 errors |
-| prepared_statements | pass — 0 errors | partial — ~13 errors |
+| prepared_statements | pass — 0 errors | pass — 0 errors |
 | concurrent_rw | pass — 0 errors | pass — 0 errors |
 | connection_storms | pass — 0 errors | pass — 0 errors |
 | long_running | pass — 0 errors | pass — 0 errors |
 | error_handling | pass — 0 errors | pass — 0 errors |
 | batch_operations | pass — 0 errors | pass — 0 errors |
 | pool_behavior | pass — 0 errors | pass — 0 errors |
-
-`prepared_statements` partial in transaction mode is expected: SQL `PREPARE` creates named server-side
-state that does not survive backend switches. Unnamed/parameterized queries work correctly.
 
 ### Bugs fixed
 
@@ -45,7 +39,8 @@ state that does not survive backend switches. Unnamed/parameterized queries work
 
 4. `internal/server/session/session.go` — `acquireUpstream()` failure in the transaction mode loop
    was silently dropping the TCP connection. Now sends a proper PostgreSQL error response to the
-   client before closing.
+   client before closing. Also fixed a build break: `Startup()` call was missing the `authMethod`
+   argument, and `AuthenticateUser` was renamed to `Authenticate` in the interface.
 
 **Go simulator**
 
@@ -74,57 +69,132 @@ state that does not survive backend switches. Unnamed/parameterized queries work
 
 9. `simulators/go/scenarios/pool_behavior.go` — unexpected PID changes in session mode and absent
    PID changes in transaction mode now increment `errCount` directly instead of being reported as
-   Notes (which forced a `partial` status even with 0 errors and a correct outcome). Added
-   documentation on the reliability requirement: the backend pool must have more than one connection,
-   and the false-negative probability per worker is `(1/B)^(N-1)` where B is the backend count and
-   N is the number of sequential queries.
+   Notes (which forced a `partial` status even with 0 errors and a correct outcome).
+
+10. `simulators/go/scenarios/prepared_statements.go` — the PREPARE → EXECUTE × 5 → DEALLOCATE
+    sequence was split across multiple autocommit queries. In transaction mode, Grunyas releases the
+    backend after each ReadyForQuery, so the EXECUTE lands on a different backend that has no
+    knowledge of the named statement. Fixed by wrapping the entire sequence in a `BEGIN`/`COMMIT` to
+    pin the backend throughout.
 
 ---
 
-## Java, Python, TypeScript — not yet validated
+## Python — complete
 
-All three simulators have code and results on disk, but those results pre-date the Go fixes and
-have not been re-run with the corrected Grunyas binary.
+| Scenario | Session | Transaction |
+|---|---|---|
+| basic_crud | pass — 0 errors | pass — 0 errors |
+| transactions | pass — 0 errors | pass — 0 errors |
+| prepared_statements | pass — 0 errors | pass — 0 errors |
+| concurrent_rw | pass — 0 errors | pass — 0 errors |
+| connection_storms | pass — 0 errors | pass — 0 errors |
+| long_running | pass — 0 errors | pass — 0 errors |
+| error_handling | pass — 0 errors | pass — 0 errors |
+| batch_operations | pass — 0 errors | pass — 0 errors |
+| pool_behavior | pass — 0 errors | pass — 0 errors |
 
-### Known issues (from stale results)
+### Bugs fixed
 
-| Issue | Java | Python | TypeScript |
-|---|---|---|---|
-| `transactions` — duplicate key in transaction mode | 100 errors | 100 errors | 100 errors |
-| `batch_operations` — unknown errors in both modes | 10 errors | — | — |
-| `pool_behavior` — note-based partial instead of pass/fail | yes | yes | yes |
+1. `scenarios/transactions.py` — deterministic email addresses caused duplicate key violations on
+   repeated runs. Fixed with a random `run_id` prefix per execution. Also added
+   `conn.prepare_threshold = None` in transaction mode to prevent psycopg3 from creating named
+   server-side prepared statements that don't survive backend switches.
 
-The `transactions` duplicate key issue is the same root cause as Go item 7 above: deterministic
-email addresses committed to the database pollute subsequent runs. Each simulator's transactions
-scenario needs a random run-scoped prefix.
+2. `scenarios/pool_behavior.py` — rewritten to count unexpected PID behaviour as errors (instead
+   of notes). Added `prepare_threshold = None` in transaction mode — the 10 repeated
+   `pg_backend_pid()` calls trigger psycopg3's auto-prepare after the 5th use, creating `_pg3_0`
+   etc. on B1 which don't exist on B2 after a backend switch.
 
-The Java `batch_operations` errors are uninvestigated.
+3. `scenarios/basic_crud.py`, `scenarios/concurrent_rw.py`, `scenarios/batch_operations.py` —
+   added `prepare_threshold = None` in transaction mode for the same reason.
 
-The `pool_behavior` note-based partial is the same as Go item 9 above: all three simulators need
-the same fix (count unexpected PID behavior as errors, remove Notes).
+4. `scenarios/long_running.py` — rewrote to use a shared `AsyncConnectionPool` (from
+   `psycopg_pool`) instead of raw connections per worker. The original code opened
+   `concurrency × 2` concurrent connections, exceeding the session-mode client cap, causing the
+   scenario to crash and leaving Grunyas's session counter inflated — making all subsequent
+   scenarios fail with "server sent error during SSL exchange".
 
-### What needs to be done
+5. `scenarios/prepared_statements.py` — added `conn.prepare_threshold = None` in transaction mode.
+   The 10 unnamed parameterized queries in the loop triggered psycopg3 auto-prepare after 5 uses,
+   creating `_pg3_0` named statements on one backend that didn't exist on the next. Also wrapped
+   the SQL `PREPARE`/`EXECUTE`/`DEALLOCATE` sequence in explicit `BEGIN`/`COMMIT` to pin the
+   backend, same as Go.
 
-- [ ] Fix `transactions` duplicate key in Java, Python, TypeScript (random run ID)
-- [ ] Investigate and fix Java `batch_operations` errors
-- [ ] Fix `pool_behavior` pass/fail logic in Java, Python, TypeScript
-- [ ] Run `./run.sh` in each simulator to produce clean validated results
-- [ ] Verify that Python and TypeScript use a transaction-mode-safe query exec mode (equivalent of
-      `QueryExecModeCacheDescribe`) — if their drivers use named prepared statements by default,
-      they will hit the same backend-switch failures that Go had
+6. `scenarios/connection_storms.py` — Grunyas sends SQLSTATE 53300 (too_many_connections) when
+   the session-mode client cap is hit. These are correct proxy rejections, not errors. psycopg3
+   can't extract the SQLSTATE because Grunyas sends the error before the SSL handshake completes;
+   the exception arrives as `OperationalError` with message "server sent an error response during
+   SSL exchange". Filter now matches on this message text in addition to SQLSTATE 53300.
 
 ---
 
-## Expected partial results (by design)
+## TypeScript — complete
 
-These are not bugs — they reflect genuine limitations of transaction pool mode:
+| Scenario | Session | Transaction |
+|---|---|---|
+| basic_crud | pass — 0 errors | pass — 0 errors |
+| transactions | pass — 0 errors | pass — 0 errors |
+| prepared_statements | pass — 0 errors | pass — 0 errors |
+| concurrent_rw | pass — 0 errors | pass — 0 errors |
+| connection_storms | pass — 0 errors | pass — 0 errors |
+| long_running | pass — 0 errors | pass — 0 errors |
+| error_handling | pass — 0 errors | pass — 0 errors |
+| batch_operations | pass — 0 errors | pass — 0 errors |
+| pool_behavior | pass — 0 errors | pass — 0 errors |
 
-- **`prepared_statements` — transaction mode**: SQL `PREPARE <name> AS ...` creates a named
-  server-side prepared statement scoped to the session. When Grunyas releases the backend after a
-  transaction, that named statement is gone. Drivers that fall back to unnamed/parameterized queries
-  work fine; this scenario intentionally exercises both paths to confirm which works.
+### Bugs fixed
 
-- **`pool_behavior` — transaction mode with backend count ≥ worker count**: each worker may
-  consistently get the same backend re-assigned after releasing it, producing no observable PID
-  change even though transaction-mode multiplexing is functioning correctly. This is a measurement
-  artifact, not a proxy bug.
+1. `scenarios/transactions.ts` — deterministic email addresses caused duplicate key violations on
+   repeated runs. Fixed with a random `runId` prefix per execution.
+
+2. `scenarios/poolBehavior.ts` — rewritten to count unexpected PID behaviour as errors instead of
+   notes.
+
+3. `scenarios/connectionStorms.ts` — `node-postgres` exposes the error code as `e.code`. Filter
+   added to skip `code === "53300"` (too_many_connections) rejections from Grunyas capacity limits.
+
+4. `scenarios/preparedStatements.ts` — the PREPARE/EXECUTE/DEALLOCATE sequence was wrapped in
+   `BEGIN`/`COMMIT` to pin the backend in transaction mode (same pattern as Go). Added
+   `client.on("error", () => {})` on checked-out pool clients to suppress unhandled error events
+   when Grunyas closes a connection mid-scenario. In transaction mode the named-statement block now
+   runs serially: all 20 workers entering `BEGIN` simultaneously would require 20 backends but
+   the transaction-mode pool has only 4, causing Grunyas to reject 16 with "connection pool
+   exhausted". Serial execution ensures at most 1 backend is held at a time.
+
+`node-postgres` (`pg`) uses unnamed extended-query-protocol messages for parameterized queries by
+default (no auto-caching of named server-side statements), so no `prepareThreshold` equivalent was
+needed for the other scenarios.
+
+---
+
+## Java — complete
+
+| Scenario | Session | Transaction |
+|---|---|---|
+| basic_crud | pass — 0 errors | pass — 0 errors |
+| transactions | pass — 0 errors | pass — 0 errors |
+| prepared_statements | pass — 0 errors | pass — 0 errors |
+| concurrent_rw | pass — 0 errors | pass — 0 errors |
+| connection_storms | pass — 0 errors | pass — 0 errors |
+| long_running | pass — 0 errors | pass — 0 errors |
+| error_handling | pass — 0 errors | pass — 0 errors |
+| batch_operations | pass — 0 errors | pass — 0 errors |
+| pool_behavior | pass — 0 errors | pass — 0 errors |
+
+Java simulator was written from scratch (only `pom.xml` and `Dockerfile` existed previously).
+Uses HikariCP for connection pooling and pgjdbc for the PostgreSQL driver.
+
+### Implementation notes
+
+- `prepareThreshold=0` set on the HikariCP datasource in transaction mode to disable pgjdbc's
+  server-side statement caching. pgjdbc names auto-prepared statements `S_1`, `S_2`, etc.; these
+  don't survive backend switches in transaction mode.
+
+- `prepared_statements`: SQL `PREPARE`/`EXECUTE`/`DEALLOCATE` wrapped in `BEGIN`/`COMMIT` to pin
+  the backend for the full sequence — same pattern as Go.
+
+- `batch_operations`: bulk INSERT uses `?::jsonb` cast in the SQL because pgjdbc sends `setString`
+  parameters as `varchar`, which PostgreSQL rejects for JSONB columns without an explicit cast.
+
+- `connection_storms`: filters `SQLState == "53300"` to exclude Grunyas capacity rejections from
+  the error count.

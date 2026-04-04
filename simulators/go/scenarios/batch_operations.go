@@ -17,10 +17,10 @@ func BatchOperations(ctx context.Context, cfg *Config) (*Result, error) {
 	defer pool.Close()
 
 	var (
-		ops       atomic.Int64
-		errCount  atomic.Int64
-		mu        sync.Mutex
-		latencies []time.Duration
+		ops        atomic.Int64
+		errCount   atomic.Int64
+		mu         sync.Mutex
+		latencies  []time.Duration
 	)
 
 	start := time.Now()
@@ -35,7 +35,9 @@ func BatchOperations(ctx context.Context, cfg *Config) (*Result, error) {
 			t := time.Now()
 			tx, err := pool.Begin(ctx)
 			if err != nil {
-				errCount.Add(1)
+				if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+					errCount.Add(1)
+				}
 				ops.Add(1)
 				return
 			}
@@ -63,7 +65,9 @@ func BatchOperations(ctx context.Context, cfg *Config) (*Result, error) {
 			mu.Unlock()
 			ops.Add(1)
 			if err != nil {
-				errCount.Add(1)
+				if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+					errCount.Add(1)
+				}
 			}
 
 			// --- Multi-row INSERT using VALUES ---
@@ -81,7 +85,9 @@ func BatchOperations(ctx context.Context, cfg *Config) (*Result, error) {
 			mu.Unlock()
 			ops.Add(1)
 			if err != nil {
-				errCount.Add(1)
+				if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+					errCount.Add(1)
+				}
 			}
 
 			// --- Bulk read ---
@@ -90,7 +96,9 @@ func BatchOperations(ctx context.Context, cfg *Config) (*Result, error) {
 				"SELECT id, type, payload FROM events WHERE type = $1 LIMIT 100",
 				fmt.Sprintf("batch_event_%d", workerID))
 			if err != nil {
-				errCount.Add(1)
+				if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+					errCount.Add(1)
+				}
 				ops.Add(1)
 				return
 			}
@@ -105,7 +113,9 @@ func BatchOperations(ctx context.Context, cfg *Config) (*Result, error) {
 			mu.Unlock()
 			ops.Add(1)
 			if rows.Err() != nil {
-				errCount.Add(1)
+				if !(cfg.PoolMode == "session" && IsCapacityError(rows.Err())) {
+					errCount.Add(1)
+				}
 			}
 		}(i)
 	}

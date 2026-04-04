@@ -13,10 +13,12 @@ export async function connectionStorms(config: Config): Promise<RawResult> {
     try {
       await client.connect();
       await client.query("SELECT 1");
-      ops++;
-    } catch { errors++; ops++; }
+    } catch (e: any) {
+      // 53300 = too_many_connections: Grunyas correctly rejected at capacity — not an error
+      if (e?.code !== "53300") errors++;
+    }
     finally { try { await client.end(); } catch {} }
-    latencies.push(performance.now() - t);
+    latencies.push(performance.now() - t); ops++;
   })());
 
   await Promise.all(storms);

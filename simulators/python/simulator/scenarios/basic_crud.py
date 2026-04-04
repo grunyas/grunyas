@@ -6,8 +6,10 @@ import time
 import psycopg
 
 
-async def _worker(conninfo: str, worker_id: int, ops: list, errors: list, latencies: list):
+async def _worker(conninfo: str, worker_id: int, pool_mode: str, ops: list, errors: list, latencies: list):
     async with await psycopg.AsyncConnection.connect(conninfo) as conn:
+        if pool_mode == "transaction":
+            conn.prepare_threshold = None
         await conn.set_autocommit(True)
         for i in range(20):
             email = f"crud_{worker_id}_{i}@test.com"
@@ -70,7 +72,7 @@ async def run(config: dict) -> dict:
 
     async def bounded_worker(wid):
         async with sem:
-            await _worker(conninfo, wid, ops, errors, latencies)
+            await _worker(conninfo, wid, config["pool_mode"], ops, errors, latencies)
 
     await asyncio.gather(*(bounded_worker(i) for i in range(concurrency)))
     duration = (time.monotonic() - start) * 1000

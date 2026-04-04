@@ -47,7 +47,10 @@ func ConnectionStorms(ctx context.Context, cfg *Config) (*Result, error) {
 			t := time.Now()
 			conn, err := pgx.ConnectConfig(ctx, connCfg)
 			if err != nil {
-				errCount.Add(1)
+				// Filter capacity rejections (SQLSTATE 53300) in session mode
+				if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+					errCount.Add(1)
+				}
 				ops.Add(1)
 				return
 			}
@@ -56,7 +59,9 @@ func ConnectionStorms(ctx context.Context, cfg *Config) (*Result, error) {
 			err = conn.QueryRow(ctx, "SELECT 1").Scan(&result)
 			ops.Add(1)
 			if err != nil {
-				errCount.Add(1)
+				if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+					errCount.Add(1)
+				}
 			}
 
 			_ = conn.Close(ctx)

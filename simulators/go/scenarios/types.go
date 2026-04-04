@@ -2,11 +2,13 @@ package scenarios
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // Config holds the connection and concurrency settings for scenario execution.
@@ -28,6 +30,16 @@ type Result struct {
 	Duration  time.Duration
 	Latencies []time.Duration
 	Notes     []string
+}
+
+// IsCapacityError checks if an error is a capacity rejection (SQLSTATE 53300: too_many_connections).
+// These are expected in session mode when the client cap is reached and should not be counted as errors.
+func IsCapacityError(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "53300"
+	}
+	return false
 }
 
 // NewPool creates a new connection pool using the scenario config.
