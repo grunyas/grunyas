@@ -63,7 +63,10 @@ export CLIENT_MAX_CONNS=$SESSION_CLIENT_MAX
 export CONCURRENCY=$SESSION_CONCURRENCY
 # pgbouncer max_client_conn must accommodate pool_max_conns (concurrency+10) from main.go
 export PGBOUNCER_MAX_CLIENT_CONN=$((SESSION_CONCURRENCY + 20))
-docker compose --profile "$PROXY" up --build --abort-on-container-exit simulator
+# Explicitly start postgres and proxy service to ensure they're ready before simulator
+docker compose --profile "$PROXY" up -d postgres "$PROXY" 2>&1 | head -20
+sleep 5  # Give services time to start
+docker compose --profile "$PROXY" up --abort-on-container-exit simulator
 docker compose --profile "$PROXY" down -v
 
 # --- Transaction Mode ---
@@ -82,6 +85,9 @@ export CLIENT_MAX_CONNS=$TX_CLIENT_MAX
 export CONCURRENCY=$TX_CONCURRENCY
 # pgbouncer max_client_conn must accommodate pool_max_conns (concurrency+10) from main.go
 export PGBOUNCER_MAX_CLIENT_CONN=$((TX_CONCURRENCY + 20))
+# Explicitly start postgres and proxy service to ensure they're ready before simulator
+docker compose --profile "$PROXY" up -d postgres "$PROXY" 2>&1 | head -20
+sleep 5  # Give services time to start
 docker compose --profile "$PROXY" up --abort-on-container-exit simulator
 docker compose --profile "$PROXY" down -v
 
