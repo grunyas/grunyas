@@ -1,19 +1,51 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Ensure docker is available on macOS where it's in /usr/local/bin
+export PATH="/usr/local/bin:/Applications/Docker.app/Contents/Resources/bin:${PATH:-}"
+
 cd "$(dirname "$0")"
 
 # Load sizing model (see shared/SIZING.md)
 source ../shared/sizing.sh
 
+# --- Parse arguments ---
+PROXY="grunyas"  # default
 REQUESTED_CONCURRENCY="${CONCURRENCY:-100}"
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --proxy)
+      PROXY="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+if [[ "$PROXY" != "grunyas" && "$PROXY" != "pgbouncer" && "$PROXY" != "pgcat" ]]; then
+  echo "Error: --proxy must be one of: grunyas, pgbouncer, pgcat"
+  exit 1
+fi
+
+# Proxy-specific port
+case "$PROXY" in
+  grunyas)   PROXY_PORT=5711 ;;
+  pgbouncer) PROXY_PORT=6432 ;;
+  pgcat)     PROXY_PORT=6432 ;;
+esac
+
+export PROXY PROXY_PORT
 
 cleanup() {
     echo "=== Cleaning up ==="
-    docker compose down -v 2>/dev/null || true
+    docker compose --profile "$PROXY" down -v 2>/dev/null || true
 }
 trap cleanup EXIT
 
+echo "=== Proxy: $PROXY ==="
 print_sizing
 
 # --- Session Mode ---
@@ -29,8 +61,10 @@ export BACKEND_MAX_CONNS=$SESSION_BACKEND_MAX
 export BACKEND_MIN_CONNS=$SESSION_BACKEND_MIN
 export CLIENT_MAX_CONNS=$SESSION_CLIENT_MAX
 export CONCURRENCY=$SESSION_CONCURRENCY
-docker compose up --build --abort-on-container-exit simulator
-docker compose down -v
+# pgbouncer max_client_conn must accommodate pool_max_conns (concurrency+10) from main.go
+export PGBOUNCER_MAX_CLIENT_CONN=$((SESSION_CONCURRENCY + 20))
+docker compose --profile "$PROXY" up --build --abort-on-container-exit simulator
+docker compose --profile "$PROXY" down -v
 
 # --- Transaction Mode ---
 TX_CONCURRENCY=$REQUESTED_CONCURRENCY
@@ -46,17 +80,23 @@ export BACKEND_MAX_CONNS=$TX_BACKEND_MAX
 export BACKEND_MIN_CONNS=$TX_BACKEND_MIN
 export CLIENT_MAX_CONNS=$TX_CLIENT_MAX
 export CONCURRENCY=$TX_CONCURRENCY
-docker compose up --abort-on-container-exit simulator
-docker compose down -v
+# pgbouncer max_client_conn must accommodate pool_max_conns (concurrency+10) from main.go
+export PGBOUNCER_MAX_CLIENT_CONN=$((TX_CONCURRENCY + 20))
+docker compose --profile "$PROXY" up --abort-on-container-exit simulator
+docker compose --profile "$PROXY" down -v
 
 echo ""
 echo "=== Merging results ==="
-if [ -f results/session.json ] && [ -f results/transaction.json ]; then
+SESSION_FILE="results/${PROXY}_session.json"
+TX_FILE="results/${PROXY}_transaction.json"
+REPORT_FILE="results/${PROXY}_report.json"
+
+if [ -f "$SESSION_FILE" ] && [ -f "$TX_FILE" ]; then
     python3 -c "
 import json, sys
-with open('results/session.json') as f:
+with open('$SESSION_FILE') as f:
     session = json.load(f)
-with open('results/transaction.json') as f:
+with open('$TX_FILE') as f:
     transaction = json.load(f)
 report = {
     'simulator': session['simulator'],
@@ -65,7 +105,7 @@ report = {
     'runs': session['runs'] + transaction['runs']
 }
 json.dump(report, sys.stdout, indent=2)
-" > results/report.json 2>/dev/null && echo "Results written to results/report.json" || echo "Merge failed - check individual result files"
+" > "$REPORT_FILE" 2>/dev/null && echo "Results written to $REPORT_FILE" || echo "Merge failed - check individual result files"
 else
     echo "Warning: Missing result files."
     ls -la results/ 2>/dev/null || true

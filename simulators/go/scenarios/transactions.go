@@ -40,7 +40,7 @@ func Transactions(ctx context.Context, cfg *Config) (*Result, error) {
 				t := time.Now()
 				tx, err := pool.Begin(ctx)
 				if err != nil {
-					if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+					if !(IsCapacityError(err)) {
 						errCount.Add(1)
 					}
 					ops.Add(1)
@@ -52,7 +52,7 @@ func Transactions(ctx context.Context, cfg *Config) (*Result, error) {
 					fmt.Sprintf("tx_user_%d_%d", workerID, iter), email, 500.00)
 				if err != nil {
 					_ = tx.Rollback(ctx)
-					if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+					if !(IsCapacityError(err)) {
 						errCount.Add(1)
 					}
 					ops.Add(1)
@@ -66,7 +66,7 @@ func Transactions(ctx context.Context, cfg *Config) (*Result, error) {
 				mu.Unlock()
 				ops.Add(1)
 				if err != nil {
-					if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+					if !(IsCapacityError(err)) {
 						errCount.Add(1)
 					}
 				}
@@ -75,7 +75,7 @@ func Transactions(ctx context.Context, cfg *Config) (*Result, error) {
 				t = time.Now()
 				tx, err = pool.Begin(ctx)
 				if err != nil {
-					if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+					if !(IsCapacityError(err)) {
 						errCount.Add(1)
 					}
 					ops.Add(1)
@@ -92,7 +92,7 @@ func Transactions(ctx context.Context, cfg *Config) (*Result, error) {
 				mu.Unlock()
 				ops.Add(1)
 				if err != nil {
-					if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+					if !(IsCapacityError(err)) {
 						errCount.Add(1)
 					}
 				}
@@ -101,7 +101,7 @@ func Transactions(ctx context.Context, cfg *Config) (*Result, error) {
 				t = time.Now()
 				tx, err = pool.Begin(ctx)
 				if err != nil {
-					if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+					if !(IsCapacityError(err)) {
 						errCount.Add(1)
 					}
 					ops.Add(1)
@@ -120,7 +120,7 @@ func Transactions(ctx context.Context, cfg *Config) (*Result, error) {
 				mu.Unlock()
 				ops.Add(1)
 				if err != nil {
-					if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+					if !(IsCapacityError(err)) {
 						errCount.Add(1)
 					}
 				}

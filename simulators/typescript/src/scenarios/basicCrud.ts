@@ -1,5 +1,5 @@
 import { Pool } from "pg";
-import { Config, RawResult } from "../types";
+import { Config, RawResult, isCapacityError } from "../types";
 
 export async function basicCrud(config: Config): Promise<RawResult> {
   const pool = new Pool({ host: config.host, port: config.port, user: config.user, password: config.password, database: config.database, max: config.concurrency });
@@ -18,25 +18,25 @@ export async function basicCrud(config: Config): Promise<RawResult> {
       try {
         const res = await pool.query("INSERT INTO users (name, email, balance) VALUES ($1, $2, $3) RETURNING id", [`crud_user_${i}_${iter}`, email, 100.0]);
         userId = res.rows[0].id;
-      } catch { errors++; ops++; latencies.push(performance.now() - t); continue; }
+      } catch (e) { if (!isCapacityError(e)) errors++; ops++; latencies.push(performance.now() - t); continue; }
       latencies.push(performance.now() - t); ops++;
 
       // SELECT
       t = performance.now();
       try { await pool.query("SELECT name FROM users WHERE id = $1", [userId]); }
-      catch { errors++; }
+      catch (e) { if (!isCapacityError(e)) errors++; }
       latencies.push(performance.now() - t); ops++;
 
       // UPDATE
       t = performance.now();
       try { await pool.query("UPDATE users SET balance = balance + 50 WHERE id = $1", [userId]); }
-      catch { errors++; }
+      catch (e) { if (!isCapacityError(e)) errors++; }
       latencies.push(performance.now() - t); ops++;
 
       // DELETE
       t = performance.now();
       try { await pool.query("DELETE FROM users WHERE id = $1", [userId]); }
-      catch { errors++; }
+      catch (e) { if (!isCapacityError(e)) errors++; }
       latencies.push(performance.now() - t); ops++;
     }
   })());

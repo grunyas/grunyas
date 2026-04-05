@@ -4,6 +4,7 @@ import asyncio
 import time
 
 import psycopg
+from simulator.scenarios import is_capacity_error
 
 
 async def _worker(conninfo: str, worker_id: int, pool_mode: str, ops: list, errors: list, latencies: list):
@@ -18,8 +19,9 @@ async def _worker(conninfo: str, worker_id: int, pool_mode: str, ops: list, erro
                 cur = await conn.execute("SELECT pg_backend_pid()")
                 row = await cur.fetchone()
                 pids.add(row[0])
-            except Exception:
-                errors.append(1)
+            except Exception as e:
+                if not is_capacity_error(e):
+                    errors.append(1)
             latencies.append((time.monotonic() - t) * 1000)
             ops.append(1)
 

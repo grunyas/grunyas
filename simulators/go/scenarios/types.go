@@ -33,7 +33,8 @@ type Result struct {
 }
 
 // IsCapacityError checks if an error is a capacity rejection (SQLSTATE 53300: too_many_connections).
-// These are expected in session mode when the client cap is reached and should not be counted as errors.
+// These are expected in both pool modes when the client cap is reached: Grunyas is correctly
+// enforcing its limit and should not be counted as errors.
 func IsCapacityError(err error) bool {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {

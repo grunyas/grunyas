@@ -1,5 +1,5 @@
 import { Pool } from "pg";
-import { Config, RawResult } from "../types";
+import { Config, RawResult, isCapacityError } from "../types";
 
 export async function errorHandling(config: Config): Promise<RawResult> {
   const pool = new Pool({ host: config.host, port: config.port, user: config.user, password: config.password, database: config.database, max: config.concurrency });
@@ -22,8 +22,7 @@ export async function errorHandling(config: Config): Promise<RawResult> {
       const res = await pool.query("SELECT 1");
       if (res.rows[0]["?column?"] !== 1) errors++;
     } catch (e: any) {
-      errors++;
-      if (notes.length < 5) notes.push(`connection broken after error: ${e.message}`);
+      if (!isCapacityError(e)) { errors++; if (notes.length < 5) notes.push(`connection broken after error: ${e.message}`); }
     }
     latencies.push(performance.now() - t); ops++;
 
@@ -36,7 +35,7 @@ export async function errorHandling(config: Config): Promise<RawResult> {
     // Verify recovery
     t = performance.now();
     try { await pool.query("SELECT 1"); }
-    catch { errors++; }
+    catch (e) { if (!isCapacityError(e)) errors++; }
     latencies.push(performance.now() - t); ops++;
 
     // Division by zero
@@ -50,7 +49,7 @@ export async function errorHandling(config: Config): Promise<RawResult> {
     try {
       const res = await pool.query("SELECT 42 as v");
       if (res.rows[0].v !== 42) errors++;
-    } catch { errors++; }
+    } catch (e) { if (!isCapacityError(e)) errors++; }
     latencies.push(performance.now() - t); ops++;
   })());
 

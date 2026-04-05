@@ -82,19 +82,21 @@ func main() {
 	dbName := env("DB_NAME", "simulator")
 	concurrency := envInt("CONCURRENCY", 100)
 	poolMode := env("POOL_MODE", "session")
+	proxy := env("PROXY", "grunyas")
 
 	connStr := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?pool_max_conns=%d",
 		dbUser, dbPass, dbHost, dbPort, dbName, concurrency+10)
 
-	log.Printf("Go Simulator starting: pool_mode=%s concurrency=%d host=%s:%s",
-		poolMode, concurrency, dbHost, dbPort)
+	log.Printf("Go Simulator starting: proxy=%s pool_mode=%s concurrency=%d host=%s:%s",
+		proxy, poolMode, concurrency, dbHost, dbPort)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	// Wait for Grunyas to be ready
+	// Wait for proxy to be ready (up to 2 minutes with 2s intervals)
 	var pool *pgxpool.Pool
-	for i := 0; i < 30; i++ {
+	maxAttempts := 60
+	for i := 0; i < maxAttempts; i++ {
 		var err error
 		pool, err = pgxpool.New(ctx, connStr)
 		if err == nil {
@@ -104,11 +106,11 @@ func main() {
 			pool.Close()
 			pool = nil
 		}
-		log.Printf("Waiting for database... attempt %d/30", i+1)
+		log.Printf("Waiting for database... attempt %d/%d", i+1, maxAttempts)
 		time.Sleep(2 * time.Second)
 	}
 	if pool == nil {
-		log.Fatal("Failed to connect to database after 30 attempts")
+		log.Fatalf("Failed to connect to database after %d attempts", maxAttempts)
 	}
 	defer pool.Close()
 
@@ -182,14 +184,15 @@ func main() {
 		Simulator: "go",
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		Config: map[string]interface{}{
+			"proxy":       proxy,
 			"concurrency": concurrency,
 			"driver":      "pgx/v5",
 		},
 		Runs: []Run{run},
 	}
 
-	// Write results
-	outPath := filepath.Join("results", poolMode+".json")
+	// Write results — filename includes proxy so multiple proxy runs coexist
+	outPath := filepath.Join("results", proxy+"_"+poolMode+".json")
 	data, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
 		log.Fatalf("Failed to marshal results: %v", err)

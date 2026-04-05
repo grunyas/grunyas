@@ -1,5 +1,5 @@
 import { Pool } from "pg";
-import { Config, RawResult } from "../types";
+import { Config, RawResult, isCapacityError } from "../types";
 
 export async function transactions(config: Config): Promise<RawResult> {
   const pool = new Pool({ host: config.host, port: config.port, user: config.user, password: config.password, database: config.database, max: config.concurrency });
@@ -19,7 +19,7 @@ export async function transactions(config: Config): Promise<RawResult> {
         await client.query("BEGIN");
         await client.query("INSERT INTO users (name, email, balance) VALUES ($1, $2, $3)", [`tx_user_${i}_${iter}`, `tx_${runId}_${i}_${iter}@test.com`, 500.0]);
         await client.query("COMMIT");
-      } catch { errors++; try { await client.query("ROLLBACK"); } catch {} }
+      } catch (e) { if (!isCapacityError(e)) errors++; try { await client.query("ROLLBACK"); } catch {} }
       finally { client.release(); }
       latencies.push(performance.now() - t); ops++;
 
@@ -43,7 +43,7 @@ export async function transactions(config: Config): Promise<RawResult> {
         await client3.query("INSERT INTO users (name, email, balance) VALUES ($1, $2, $3)", ["sp_user", `sp_${i}_${iter}@test.com`, 100.0]);
         await client3.query("ROLLBACK TO SAVEPOINT sp1");
         await client3.query("COMMIT");
-      } catch { errors++; try { await client3.query("ROLLBACK"); } catch {} }
+      } catch (e) { if (!isCapacityError(e)) errors++; try { await client3.query("ROLLBACK"); } catch {} }
       finally { client3.release(); }
       latencies.push(performance.now() - t); ops++;
     }

@@ -55,7 +55,7 @@ func PreparedStatements(ctx context.Context, cfg *Config) (*Result, error) {
 				mu.Unlock()
 				ops.Add(1)
 				if err != nil {
-					if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+					if !(IsCapacityError(err)) {
 						errCount.Add(1)
 					}
 				}
@@ -66,7 +66,7 @@ func PreparedStatements(ctx context.Context, cfg *Config) (*Result, error) {
 			// the full PREPARE → EXECUTE → DEALLOCATE sequence.
 			conn, err := pool.Acquire(ctx)
 			if err != nil {
-				if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+				if !(IsCapacityError(err)) {
 					errCount.Add(1)
 				}
 				ops.Add(1)
@@ -75,7 +75,7 @@ func PreparedStatements(ctx context.Context, cfg *Config) (*Result, error) {
 			defer conn.Release()
 
 			if _, err := conn.Exec(ctx, "BEGIN"); err != nil {
-				if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+				if !(IsCapacityError(err)) {
 					errCount.Add(1)
 				}
 				ops.Add(1)
@@ -92,7 +92,7 @@ func PreparedStatements(ctx context.Context, cfg *Config) (*Result, error) {
 			mu.Unlock()
 			ops.Add(1)
 			if err != nil {
-				if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+				if !(IsCapacityError(err)) {
 					errCount.Add(1)
 				}
 				rollback()
@@ -109,7 +109,7 @@ func PreparedStatements(ctx context.Context, cfg *Config) (*Result, error) {
 				mu.Unlock()
 				ops.Add(1)
 				if err != nil {
-					if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+					if !(IsCapacityError(err)) {
 						errCount.Add(1)
 					}
 					continue
@@ -120,13 +120,13 @@ func PreparedStatements(ctx context.Context, cfg *Config) (*Result, error) {
 			_, err = conn.Exec(ctx, "DEALLOCATE "+stmtName)
 			ops.Add(1)
 			if err != nil {
-				if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+				if !(IsCapacityError(err)) {
 					errCount.Add(1)
 				}
 			}
 
 			if _, err := conn.Exec(ctx, "COMMIT"); err != nil {
-				if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+				if !(IsCapacityError(err)) {
 					errCount.Add(1)
 				}
 			}

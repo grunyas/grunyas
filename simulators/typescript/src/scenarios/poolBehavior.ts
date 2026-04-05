@@ -1,5 +1,5 @@
 import { Pool } from "pg";
-import { Config, RawResult } from "../types";
+import { Config, RawResult, isCapacityError } from "../types";
 
 export async function poolBehavior(config: Config): Promise<RawResult> {
   const pool = new Pool({ host: config.host, port: config.port, user: config.user, password: config.password, database: config.database, max: config.concurrency });
@@ -19,7 +19,7 @@ export async function poolBehavior(config: Config): Promise<RawResult> {
         try {
           const res = await client.query("SELECT pg_backend_pid() as pid");
           pids.add(res.rows[0].pid);
-        } catch { errors++; }
+        } catch (e) { if (!isCapacityError(e)) errors++; }
         latencies.push(performance.now() - t); ops++;
       }
     } finally { client.release(); }

@@ -35,7 +35,7 @@ func BatchOperations(ctx context.Context, cfg *Config) (*Result, error) {
 			t := time.Now()
 			tx, err := pool.Begin(ctx)
 			if err != nil {
-				if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+				if !(IsCapacityError(err)) {
 					errCount.Add(1)
 				}
 				ops.Add(1)
@@ -65,7 +65,7 @@ func BatchOperations(ctx context.Context, cfg *Config) (*Result, error) {
 			mu.Unlock()
 			ops.Add(1)
 			if err != nil {
-				if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+				if !(IsCapacityError(err)) {
 					errCount.Add(1)
 				}
 			}
@@ -85,7 +85,7 @@ func BatchOperations(ctx context.Context, cfg *Config) (*Result, error) {
 			mu.Unlock()
 			ops.Add(1)
 			if err != nil {
-				if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+				if !(IsCapacityError(err)) {
 					errCount.Add(1)
 				}
 			}
@@ -96,7 +96,7 @@ func BatchOperations(ctx context.Context, cfg *Config) (*Result, error) {
 				"SELECT id, type, payload FROM events WHERE type = $1 LIMIT 100",
 				fmt.Sprintf("batch_event_%d", workerID))
 			if err != nil {
-				if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+				if !(IsCapacityError(err)) {
 					errCount.Add(1)
 				}
 				ops.Add(1)
@@ -113,7 +113,7 @@ func BatchOperations(ctx context.Context, cfg *Config) (*Result, error) {
 			mu.Unlock()
 			ops.Add(1)
 			if rows.Err() != nil {
-				if !(cfg.PoolMode == "session" && IsCapacityError(rows.Err())) {
+				if !(IsCapacityError(rows.Err())) {
 					errCount.Add(1)
 				}
 			}

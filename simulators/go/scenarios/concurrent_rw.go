@@ -47,7 +47,7 @@ func ConcurrentRW(ctx context.Context, cfg *Config) (*Result, error) {
 					mu.Unlock()
 					ops.Add(1)
 					if err != nil {
-						if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+						if !(IsCapacityError(err)) {
 							errCount.Add(1)
 						}
 					}
@@ -59,7 +59,7 @@ func ConcurrentRW(ctx context.Context, cfg *Config) (*Result, error) {
 					t := time.Now()
 					tx, err := pool.Begin(ctx)
 					if err != nil {
-						if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+						if !(IsCapacityError(err)) {
 							errCount.Add(1)
 						}
 						ops.Add(1)
@@ -69,7 +69,7 @@ func ConcurrentRW(ctx context.Context, cfg *Config) (*Result, error) {
 					_, err = tx.Exec(ctx, "UPDATE users SET balance = balance - $1 WHERE id = $2", amount, userID)
 					if err != nil {
 						_ = tx.Rollback(ctx)
-						if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+						if !(IsCapacityError(err)) {
 							errCount.Add(1)
 						}
 						ops.Add(1)
@@ -79,7 +79,7 @@ func ConcurrentRW(ctx context.Context, cfg *Config) (*Result, error) {
 					_, err = tx.Exec(ctx, "UPDATE users SET balance = balance + $1 WHERE id = $2", amount, otherID)
 					if err != nil {
 						_ = tx.Rollback(ctx)
-						if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+						if !(IsCapacityError(err)) {
 							errCount.Add(1)
 						}
 						ops.Add(1)
@@ -93,7 +93,7 @@ func ConcurrentRW(ctx context.Context, cfg *Config) (*Result, error) {
 					mu.Unlock()
 					ops.Add(1)
 					if err != nil {
-						if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+						if !(IsCapacityError(err)) {
 							errCount.Add(1)
 						}
 					}

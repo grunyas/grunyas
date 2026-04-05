@@ -4,6 +4,7 @@ import asyncio
 import time
 
 import psycopg
+from simulator.scenarios import is_capacity_error
 
 
 async def _worker(conninfo: str, worker_id: int, pool_mode: str, ops: list, errors: list, latencies: list):
@@ -23,8 +24,9 @@ async def _worker(conninfo: str, worker_id: int, pool_mode: str, ops: list, erro
                 )
                 row = await cur.fetchone()
                 user_id = row[0]
-            except Exception:
-                errors.append(1)
+            except Exception as e:
+                if not is_capacity_error(e):
+                    errors.append(1)
                 ops.append(1)
                 latencies.append((time.monotonic() - t) * 1000)
                 continue
@@ -35,8 +37,9 @@ async def _worker(conninfo: str, worker_id: int, pool_mode: str, ops: list, erro
             t = time.monotonic()
             try:
                 await conn.execute("SELECT name FROM users WHERE id = %s", (user_id,))
-            except Exception:
-                errors.append(1)
+            except Exception as e:
+                if not is_capacity_error(e):
+                    errors.append(1)
             latencies.append((time.monotonic() - t) * 1000)
             ops.append(1)
 
@@ -44,8 +47,9 @@ async def _worker(conninfo: str, worker_id: int, pool_mode: str, ops: list, erro
             t = time.monotonic()
             try:
                 await conn.execute("UPDATE users SET balance = balance + 50 WHERE id = %s", (user_id,))
-            except Exception:
-                errors.append(1)
+            except Exception as e:
+                if not is_capacity_error(e):
+                    errors.append(1)
             latencies.append((time.monotonic() - t) * 1000)
             ops.append(1)
 
@@ -53,8 +57,9 @@ async def _worker(conninfo: str, worker_id: int, pool_mode: str, ops: list, erro
             t = time.monotonic()
             try:
                 await conn.execute("DELETE FROM users WHERE id = %s", (user_id,))
-            except Exception:
-                errors.append(1)
+            except Exception as e:
+                if not is_capacity_error(e):
+                    errors.append(1)
             latencies.append((time.monotonic() - t) * 1000)
             ops.append(1)
 

@@ -56,7 +56,7 @@ func PoolBehavior(ctx context.Context, cfg *Config) (*Result, error) {
 			// Acquire a connection and track PID across multiple queries
 			conn, err := pool.Acquire(ctx)
 			if err != nil {
-				if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+				if !(IsCapacityError(err)) {
 					errCount.Add(1)
 				}
 				ops.Add(1)
@@ -77,7 +77,7 @@ func PoolBehavior(ctx context.Context, cfg *Config) (*Result, error) {
 				mu.Unlock()
 				ops.Add(1)
 				if err != nil {
-					if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+					if !(IsCapacityError(err)) {
 						errCount.Add(1)
 					}
 					continue

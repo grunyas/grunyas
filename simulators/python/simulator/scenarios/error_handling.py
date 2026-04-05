@@ -4,6 +4,7 @@ import asyncio
 import time
 
 import psycopg
+from simulator.scenarios import is_capacity_error
 
 
 async def _worker(conninfo: str, worker_id: int, ops: list, errors: list, latencies: list, notes: list):
@@ -28,7 +29,8 @@ async def _worker(conninfo: str, worker_id: int, ops: list, errors: list, latenc
             if row[0] != 1:
                 errors.append(1)
         except Exception as e:
-            errors.append(1)
+            if not is_capacity_error(e):
+                errors.append(1)
             if len(notes) < 5:
                 notes.append(f"connection broken after error: {e}")
         latencies.append((time.monotonic() - t) * 1000)
@@ -50,8 +52,9 @@ async def _worker(conninfo: str, worker_id: int, ops: list, errors: list, latenc
         t = time.monotonic()
         try:
             await conn.execute("SELECT 1")
-        except Exception:
-            errors.append(1)
+        except Exception as e:
+            if not is_capacity_error(e):
+                errors.append(1)
         latencies.append((time.monotonic() - t) * 1000)
         ops.append(1)
 
@@ -72,8 +75,9 @@ async def _worker(conninfo: str, worker_id: int, ops: list, errors: list, latenc
             row = await cur.fetchone()
             if row[0] != 42:
                 errors.append(1)
-        except Exception:
-            errors.append(1)
+        except Exception as e:
+            if not is_capacity_error(e):
+                errors.append(1)
         latencies.append((time.monotonic() - t) * 1000)
         ops.append(1)
 

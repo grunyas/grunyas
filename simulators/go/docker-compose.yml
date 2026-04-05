@@ -20,7 +20,9 @@ services:
       timeout: 3s
       retries: 30
 
+  # --- Grunyas (default proxy) ---
   grunyas:
+    profiles: [grunyas]
     build:
       context: ../../
       dockerfile: benchmark/Dockerfile
@@ -54,19 +56,85 @@ services:
       timeout: 3s
       retries: 30
 
+  # --- PgBouncer ---
+  pgbouncer:
+    profiles: [pgbouncer]
+    image: edoburu/pgbouncer:latest
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: simulator
+      POOL_MODE: "${POOL_MODE:-session}"
+      # pgbouncer max_client_conn; must accommodate pool_max_conns from simulator
+      # Simulator uses pool_max_conns = concurrency + 10, where concurrency can be up to 200
+      MAX_CLIENT_CONN: "${PGBOUNCER_MAX_CLIENT_CONN:-220}"
+      DEFAULT_POOL_SIZE: "${BACKEND_MAX_CONNS:-10}"
+      MIN_POOL_SIZE: "${BACKEND_MIN_CONNS:-2}"
+      AUTH_TYPE: plain
+      # Disable prepared statement tracking to keep comparison fair with Grunyas.
+      # Applications must wrap SQL PREPARE/EXECUTE in BEGIN/COMMIT (same as Grunyas).
+      MAX_PREPARED_STATEMENTS: "0"
+      SERVER_RESET_QUERY: "DISCARD ALL"
+      LISTEN_PORT: "6432"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [simulator]
+    deploy:
+      resources:
+        limits:
+          cpus: "${GRUNYAS_VCPUS:-2}"
+          memory: "${GRUNYAS_RAM_MB:-512}M"
+    healthcheck:
+      test: ["CMD-SHELL", "PGPASSWORD=postgres psql -h localhost -U postgres -d simulator -p 6432 -c 'SELECT 1' >/dev/null 2>&1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # --- PgCat ---
+  pgcat:
+    profiles: [pgcat]
+    build:
+      context: ./pgcat
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: simulator
+      POOL_MODE: "${POOL_MODE:-session}"
+      MAX_CLIENT_CONN: "${CLIENT_MAX_CONNS:-100}"
+      POOL_SIZE: "${BACKEND_MAX_CONNS:-10}"
+      MIN_POOL_SIZE: "${BACKEND_MIN_CONNS:-2}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [simulator]
+    deploy:
+      resources:
+        limits:
+          cpus: "${GRUNYAS_VCPUS:-2}"
+          memory: "${GRUNYAS_RAM_MB:-512}M"
+    healthcheck:
+      test: ["CMD-SHELL", "PGPASSWORD=postgres psql -h localhost -U postgres -d simulator -p 6432 -c 'SELECT 1' >/dev/null 2>&1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # --- Simulator ---
   simulator:
     build: .
     environment:
-      DB_HOST: grunyas
-      DB_PORT: "5711"
+      DB_HOST: "${PROXY:-grunyas}"
+      DB_PORT: "${PROXY_PORT:-5711}"
       DB_USER: postgres
       DB_PASSWORD: postgres
       DB_NAME: simulator
       CONCURRENCY: "${CONCURRENCY:-100}"
       POOL_MODE: "${POOL_MODE:-session}"
-    depends_on:
-      grunyas:
-        condition: service_healthy
+      PROXY: "${PROXY:-grunyas}"
     volumes:
       - ./results:/app/results
     networks: [simulator]

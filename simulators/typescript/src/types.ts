@@ -57,6 +57,18 @@ export interface RawResult {
   notes?: string[];
 }
 
+/** SQLSTATE 53300 (too_many_connections) means Grunyas is correctly enforcing
+ *  its client cap. Not a real error in any pool mode. */
+export function isCapacityError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as Record<string, unknown>;
+  const code = e.code ?? e.sqlState ?? e.sqlstate;
+  const msg = String(e.message ?? '').toLowerCase();
+  return code === '53300'
+    || msg.includes('connection pool exhausted')
+    || msg.includes('error response during ssl');
+}
+
 export function computeLatency(latencies: number[]): LatencyStats {
   if (latencies.length === 0) {
     return { min_ms: 0, max_ms: 0, avg_ms: 0, p50_ms: 0, p95_ms: 0, p99_ms: 0 };

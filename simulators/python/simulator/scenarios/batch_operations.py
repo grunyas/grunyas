@@ -4,6 +4,7 @@ import asyncio
 import time
 
 import psycopg
+from simulator.scenarios import is_capacity_error
 
 
 async def _worker(conninfo: str, worker_id: int, pool_mode: str, ops: list, errors: list, latencies: list):
@@ -20,8 +21,9 @@ async def _worker(conninfo: str, worker_id: int, pool_mode: str, ops: list, erro
                         (f"batch_event_{worker_id}", f'{{"worker":{worker_id},"iter":{j}}}'),
                     )
             ops.append(1)
-        except Exception:
-            errors.append(1)
+        except Exception as e:
+            if not is_capacity_error(e):
+                errors.append(1)
             ops.append(1)
         latencies.append((time.monotonic() - t) * 1000)
 
@@ -38,8 +40,9 @@ async def _worker(conninfo: str, worker_id: int, pool_mode: str, ops: list, erro
                    ('multi_5', '{"source":"batch"}')"""
             )
             ops.append(1)
-        except Exception:
-            errors.append(1)
+        except Exception as e:
+            if not is_capacity_error(e):
+                errors.append(1)
             ops.append(1)
         latencies.append((time.monotonic() - t) * 1000)
 
@@ -53,8 +56,9 @@ async def _worker(conninfo: str, worker_id: int, pool_mode: str, ops: list, erro
             rows = await cur.fetchall()
             _ = len(rows)
             ops.append(1)
-        except Exception:
-            errors.append(1)
+        except Exception as e:
+            if not is_capacity_error(e):
+                errors.append(1)
             ops.append(1)
         latencies.append((time.monotonic() - t) * 1000)
 

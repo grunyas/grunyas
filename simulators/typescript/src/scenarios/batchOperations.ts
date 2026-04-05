@@ -1,5 +1,5 @@
 import { Pool } from "pg";
-import { Config, RawResult } from "../types";
+import { Config, RawResult, isCapacityError } from "../types";
 
 export async function batchOperations(config: Config): Promise<RawResult> {
   const pool = new Pool({ host: config.host, port: config.port, user: config.user, password: config.password, database: config.database, max: config.concurrency });
@@ -18,7 +18,7 @@ export async function batchOperations(config: Config): Promise<RawResult> {
         await client.query("INSERT INTO events (type, payload) VALUES ($1, $2)", [`batch_event_${i}`, JSON.stringify({ worker: i, iter: j })]);
       }
       await client.query("COMMIT");
-    } catch { errors++; try { await client.query("ROLLBACK"); } catch {} }
+    } catch (e) { if (!isCapacityError(e)) errors++; try { await client.query("ROLLBACK"); } catch {} }
     finally { client.release(); }
     latencies.push(performance.now() - t); ops++;
 
@@ -29,7 +29,7 @@ export async function batchOperations(config: Config): Promise<RawResult> {
         ('multi_1', '{"source":"batch"}'), ('multi_2', '{"source":"batch"}'),
         ('multi_3', '{"source":"batch"}'), ('multi_4', '{"source":"batch"}'),
         ('multi_5', '{"source":"batch"}')`);
-    } catch { errors++; }
+    } catch (e) { if (!isCapacityError(e)) errors++; }
     latencies.push(performance.now() - t); ops++;
 
     // Bulk read
@@ -37,7 +37,7 @@ export async function batchOperations(config: Config): Promise<RawResult> {
     try {
       const res = await pool.query("SELECT id, type, payload FROM events WHERE type = $1 LIMIT 100", [`batch_event_${i}`]);
       void res.rows.length;
-    } catch { errors++; }
+    } catch (e) { if (!isCapacityError(e)) errors++; }
     latencies.push(performance.now() - t); ops++;
   })());
 

@@ -1,5 +1,5 @@
 import { Client } from "pg";
-import { Config, RawResult } from "../types";
+import { Config, RawResult, isCapacityError } from "../types";
 
 export async function connectionStorms(config: Config): Promise<RawResult> {
   let ops = 0, errors = 0;
@@ -13,9 +13,8 @@ export async function connectionStorms(config: Config): Promise<RawResult> {
     try {
       await client.connect();
       await client.query("SELECT 1");
-    } catch (e: any) {
-      // 53300 = too_many_connections: Grunyas correctly rejected at capacity — not an error
-      if (e?.code !== "53300") errors++;
+    } catch (e) {
+      if (!isCapacityError(e)) errors++;
     }
     finally { try { await client.end(); } catch {} }
     latencies.push(performance.now() - t); ops++;

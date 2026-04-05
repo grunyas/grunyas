@@ -1,5 +1,5 @@
 import { Pool } from "pg";
-import { Config, RawResult } from "../types";
+import { Config, RawResult, isCapacityError } from "../types";
 
 export async function preparedStatements(config: Config): Promise<RawResult> {
   const pool = new Pool({ host: config.host, port: config.port, user: config.user, password: config.password, database: config.database, max: config.concurrency });
@@ -14,7 +14,7 @@ export async function preparedStatements(config: Config): Promise<RawResult> {
     for (let iter = 0; iter < 10; iter++) {
       const t = performance.now();
       try { await pool.query("SELECT count(*) FROM users WHERE balance > $1", [iter * 100]); }
-      catch { errors++; }
+      catch (e) { if (!isCapacityError(e)) errors++; }
       latencies.push(performance.now() - t); ops++;
     }
   })()));
@@ -31,8 +31,8 @@ export async function preparedStatements(config: Config): Promise<RawResult> {
       let t = performance.now();
       try {
         await client.query(`PREPARE ${stmtName} AS SELECT id, name, balance FROM users WHERE id = $1`);
-      } catch {
-        errors++; ops++;
+      } catch (e) {
+        if (!isCapacityError(e)) errors++; ops++;
         try { await client.query("ROLLBACK"); } catch {}
         return;
       }
@@ -41,15 +41,15 @@ export async function preparedStatements(config: Config): Promise<RawResult> {
       for (let iter = 0; iter < 5; iter++) {
         t = performance.now();
         try { await client.query(`EXECUTE ${stmtName}(${i * 5 + iter + 1})`); }
-        catch { errors++; }
+        catch (e) { if (!isCapacityError(e)) errors++; }
         latencies.push(performance.now() - t); ops++;
       }
 
-      try { await client.query(`DEALLOCATE ${stmtName}`); } catch { errors++; }
+      try { await client.query(`DEALLOCATE ${stmtName}`); } catch (e) { if (!isCapacityError(e)) errors++; }
       ops++;
       await client.query("COMMIT");
-    } catch {
-      errors++;
+    } catch (e) {
+      if (!isCapacityError(e)) errors++;
       try { await client.query("ROLLBACK"); } catch {}
     } finally { client.release(); }
   };

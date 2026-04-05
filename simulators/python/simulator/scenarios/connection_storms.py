@@ -4,6 +4,7 @@ import asyncio
 import time
 
 import psycopg
+from simulator.scenarios import is_capacity_error
 
 
 async def _storm(conninfo: str, ops: list, errors: list, latencies: list):
@@ -13,18 +14,7 @@ async def _storm(conninfo: str, ops: list, errors: list, latencies: list):
             await conn.set_autocommit(True)
             await conn.execute("SELECT 1")
     except Exception as e:
-        # Grunyas sends SQLSTATE 53300 (too_many_connections) when the client cap is hit.
-        # psycopg3 can't extract the SQLSTATE because Grunyas sends the error response
-        # before the SSL handshake completes -- the message arrives as an OperationalError
-        # with the text "server sent an error response during SSL exchange".
-        # This is correct proxy behaviour -- not an error in the scenario.
-        msg = str(e)
-        sqlstate = getattr(e, "sqlstate", None) or getattr(e, "pgcode", None)
-        if (sqlstate == "53300"
-                or "connection pool exhausted" in msg
-                or "error response during SSL" in msg):
-            pass
-        else:
+        if not is_capacity_error(e):
             errors.append(1)
     ops.append(1)
     latencies.append((time.monotonic() - t) * 1000)

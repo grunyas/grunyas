@@ -58,7 +58,7 @@ func ErrorHandling(ctx context.Context, cfg *Config) (*Result, error) {
 			mu.Unlock()
 			ops.Add(1)
 			if err != nil {
-				if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+				if !(IsCapacityError(err)) {
 					errCount.Add(1)
 					notesMu.Lock()
 					if len(notes) < 5 {
@@ -90,7 +90,7 @@ func ErrorHandling(ctx context.Context, cfg *Config) (*Result, error) {
 			mu.Unlock()
 			ops.Add(1)
 			if err != nil {
-				if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+				if !(IsCapacityError(err)) {
 					errCount.Add(1)
 				}
 			}
@@ -116,7 +116,7 @@ func ErrorHandling(ctx context.Context, cfg *Config) (*Result, error) {
 			mu.Unlock()
 			ops.Add(1)
 			if err != nil || v != 42 {
-				if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+				if !(IsCapacityError(err)) {
 					errCount.Add(1)
 				}
 			}

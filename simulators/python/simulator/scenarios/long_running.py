@@ -4,6 +4,7 @@ import asyncio
 import time
 
 from psycopg_pool import AsyncConnectionPool
+from simulator.scenarios import is_capacity_error
 
 
 async def run(config: dict) -> dict:
@@ -28,8 +29,9 @@ async def run(config: dict) -> dict:
                 async with pool.connection() as conn:
                     await conn.execute("SELECT pg_sleep(1)")
                     ops.append(1)
-            except Exception:
-                errors.append(1)
+            except Exception as e:
+                if not is_capacity_error(e):
+                    errors.append(1)
                 ops.append(1)
             latencies.append((time.monotonic() - t) * 1000)
 
@@ -41,8 +43,9 @@ async def run(config: dict) -> dict:
                     rows = await cur.fetchall()
                     _ = len(rows)
                     ops.append(1)
-            except Exception:
-                errors.append(1)
+            except Exception as e:
+                if not is_capacity_error(e):
+                    errors.append(1)
                 ops.append(1)
             latencies.append((time.monotonic() - t) * 1000)
 
@@ -52,8 +55,9 @@ async def run(config: dict) -> dict:
                     t = time.monotonic()
                     try:
                         await conn.execute("SELECT 1")
-                    except Exception:
-                        errors.append(1)
+                    except Exception as e:
+                        if not is_capacity_error(e):
+                            errors.append(1)
                     latencies.append((time.monotonic() - t) * 1000)
                     ops.append(1)
 

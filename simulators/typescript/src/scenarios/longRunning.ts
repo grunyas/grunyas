@@ -1,5 +1,5 @@
 import { Pool } from "pg";
-import { Config, RawResult } from "../types";
+import { Config, RawResult, isCapacityError } from "../types";
 
 export async function longRunning(config: Config): Promise<RawResult> {
   const pool = new Pool({ host: config.host, port: config.port, user: config.user, password: config.password, database: config.database, max: config.concurrency });
@@ -16,7 +16,7 @@ export async function longRunning(config: Config): Promise<RawResult> {
     tasks.push((async () => {
       const t = performance.now();
       try { await pool.query("SELECT pg_sleep(1)"); }
-      catch { errors++; }
+      catch (e) { if (!isCapacityError(e)) errors++; }
       latencies.push(performance.now() - t); ops++;
     })());
   }
@@ -28,7 +28,7 @@ export async function longRunning(config: Config): Promise<RawResult> {
       try {
         const res = await pool.query("SELECT generate_series(1, 10000)");
         void res.rows.length;
-      } catch { errors++; }
+      } catch (e) { if (!isCapacityError(e)) errors++; }
       latencies.push(performance.now() - t); ops++;
     })());
   }
@@ -39,7 +39,7 @@ export async function longRunning(config: Config): Promise<RawResult> {
       for (let j = 0; j < 5; j++) {
         const t = performance.now();
         try { await pool.query("SELECT 1"); }
-        catch { errors++; }
+        catch (e) { if (!isCapacityError(e)) errors++; }
         latencies.push(performance.now() - t); ops++;
       }
     })());

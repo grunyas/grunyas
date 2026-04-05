@@ -45,7 +45,7 @@ func BasicCRUD(ctx context.Context, cfg *Config) (*Result, error) {
 				mu.Unlock()
 				ops.Add(1)
 				if err != nil {
-					if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+					if !(IsCapacityError(err)) {
 						errCount.Add(1)
 					}
 					continue
@@ -61,7 +61,7 @@ func BasicCRUD(ctx context.Context, cfg *Config) (*Result, error) {
 				mu.Unlock()
 				ops.Add(1)
 				if err != nil {
-					if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+					if !(IsCapacityError(err)) {
 						errCount.Add(1)
 					}
 					continue
@@ -76,7 +76,7 @@ func BasicCRUD(ctx context.Context, cfg *Config) (*Result, error) {
 				mu.Unlock()
 				ops.Add(1)
 				if err != nil {
-					if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+					if !(IsCapacityError(err)) {
 						errCount.Add(1)
 					}
 					continue
@@ -91,7 +91,7 @@ func BasicCRUD(ctx context.Context, cfg *Config) (*Result, error) {
 				mu.Unlock()
 				ops.Add(1)
 				if err != nil {
-					if !(cfg.PoolMode == "session" && IsCapacityError(err)) {
+					if !(IsCapacityError(err)) {
 						errCount.Add(1)
 					}
 				}

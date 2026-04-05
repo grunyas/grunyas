@@ -1,5 +1,5 @@
 import { Pool } from "pg";
-import { Config, RawResult } from "../types";
+import { Config, RawResult, isCapacityError } from "../types";
 
 export async function concurrentRw(config: Config): Promise<RawResult> {
   const pool = new Pool({ host: config.host, port: config.port, user: config.user, password: config.password, database: config.database, max: config.concurrency });
@@ -19,7 +19,7 @@ export async function concurrentRw(config: Config): Promise<RawResult> {
         // Read
         const t = performance.now();
         try { await pool.query("SELECT balance FROM users WHERE id = $1", [userId]); }
-        catch { errors++; }
+        catch (e) { if (!isCapacityError(e)) errors++; }
         latencies.push(performance.now() - t); ops++;
       } else {
         // Write — transfer
@@ -32,7 +32,7 @@ export async function concurrentRw(config: Config): Promise<RawResult> {
           await client.query("UPDATE users SET balance = balance - $1 WHERE id = $2", [amount, userId]);
           await client.query("UPDATE users SET balance = balance + $1 WHERE id = $2", [amount, otherId]);
           await client.query("COMMIT");
-        } catch { errors++; try { await client.query("ROLLBACK"); } catch {} }
+        } catch (e) { if (!isCapacityError(e)) errors++; try { await client.query("ROLLBACK"); } catch {} }
         finally { client.release(); }
         latencies.push(performance.now() - t); ops++;
       }

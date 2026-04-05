@@ -5,6 +5,7 @@ import random
 import time
 
 import psycopg
+from simulator.scenarios import is_capacity_error
 
 
 async def _worker(conninfo: str, worker_id: int, pool_mode: str, ops: list, errors: list, latencies: list):
@@ -21,8 +22,9 @@ async def _worker(conninfo: str, worker_id: int, pool_mode: str, ops: list, erro
                 try:
                     await conn.execute("SELECT balance FROM users WHERE id = %s", (user_id,))
                     await conn.commit()
-                except Exception:
-                    errors.append(1)
+                except Exception as e:
+                    if not is_capacity_error(e):
+                        errors.append(1)
                 latencies.append((time.monotonic() - t) * 1000)
                 ops.append(1)
             else:
@@ -34,8 +36,9 @@ async def _worker(conninfo: str, worker_id: int, pool_mode: str, ops: list, erro
                     async with conn.transaction():
                         await conn.execute("UPDATE users SET balance = balance - %s WHERE id = %s", (amount, user_id))
                         await conn.execute("UPDATE users SET balance = balance + %s WHERE id = %s", (amount, other_id))
-                except Exception:
-                    errors.append(1)
+                except Exception as e:
+                    if not is_capacity_error(e):
+                        errors.append(1)
                 latencies.append((time.monotonic() - t) * 1000)
                 ops.append(1)
 
