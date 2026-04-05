@@ -84,8 +84,13 @@ func main() {
 	poolMode := env("POOL_MODE", "session")
 	proxy := env("PROXY", "grunyas")
 
+	// connStr for scenarios — max_conns matches concurrency so each scenario can saturate the pool
 	connStr := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?pool_max_conns=%d",
-		dbUser, dbPass, dbHost, dbPort, dbName, concurrency+10)
+		dbUser, dbPass, dbHost, dbPort, dbName, concurrency)
+
+	// pingStr uses pool_max_conns=1 so the readiness check doesn't occupy backend slots
+	pingStr := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?pool_max_conns=1",
+		dbUser, dbPass, dbHost, dbPort, dbName)
 
 	log.Printf("Go Simulator starting: proxy=%s pool_mode=%s concurrency=%d host=%s:%s",
 		proxy, poolMode, concurrency, dbHost, dbPort)
@@ -94,27 +99,27 @@ func main() {
 	defer cancel()
 
 	// Wait for proxy to be ready (up to 2 minutes with 2s intervals)
-	var pool *pgxpool.Pool
+	// Use a single-connection pool just for readiness check, then close it.
 	maxAttempts := 60
+	ready := false
 	for i := 0; i < maxAttempts; i++ {
-		var err error
-		pool, err = pgxpool.New(ctx, connStr)
+		pingPool, err := pgxpool.New(ctx, pingStr)
 		if err == nil {
-			if err = pool.Ping(ctx); err == nil {
+			if err = pingPool.Ping(ctx); err == nil {
+				pingPool.Close()
+				ready = true
 				break
 			}
-			pool.Close()
-			pool = nil
+			pingPool.Close()
 		}
 		log.Printf("Waiting for database... attempt %d/%d", i+1, maxAttempts)
 		time.Sleep(2 * time.Second)
 	}
-	if pool == nil {
+	if !ready {
 		log.Fatalf("Failed to connect to database after %d attempts", maxAttempts)
 	}
-	defer pool.Close()
 
-	log.Println("Connected successfully, running scenarios...")
+	log.Println("Proxy ready, running scenarios...")
 
 	cfg := &scenarios.Config{
 		ConnStr:     connStr,
