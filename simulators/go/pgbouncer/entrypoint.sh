@@ -24,7 +24,7 @@ max_client_conn = ${MAX_CLIENT_CONN:-100}
 default_pool_size = ${DEFAULT_POOL_SIZE:-10}
 min_pool_size = ${MIN_POOL_SIZE:-2}
 ignore_startup_parameters = extra_float_digits
-max_prepared_statements = ${MAX_PREPARED_STATEMENTS:-0}
+# max_prepared_statements = ${MAX_PREPARED_STATEMENTS:-0}
 
 # Log settings
 admin_users = postgres
