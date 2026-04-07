@@ -21,6 +21,8 @@ cat > /etc/pgcat/pgcat.toml <<EOF
 [general]
 host = "0.0.0.0"
 port = 6432
+admin_username = "admin"
+admin_password = "admin"
 # Disable prepared statement caching so applications must wrap SQL PREPARE/EXECUTE
 # in BEGIN/COMMIT — the same requirement as Grunyas. Keeps the comparison fair.
 prepared_statements_cache_size = 0
@@ -36,7 +38,7 @@ pool_size = ${POOL_SIZE}
 min_pool_size = ${MIN_POOL_SIZE}
 max_client_conn = ${MAX_CLIENT_CONN}
 
-[[pools.${DB_NAME}.shards]]
+[pools.${DB_NAME}.shards.0]
 servers = [["${DB_HOST}", ${DB_PORT}, "primary"]]
 database = "${DB_NAME}"
 EOF

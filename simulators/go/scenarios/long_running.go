@@ -15,6 +15,7 @@ func LongRunning(ctx context.Context, cfg *Config) (*Result, error) {
 		mu        sync.Mutex
 		latencies []time.Duration
 	)
+	errs := NewErrorSampler(10)
 
 	start := time.Now()
 	var wg sync.WaitGroup
@@ -32,6 +33,7 @@ func LongRunning(ctx context.Context, cfg *Config) (*Result, error) {
 			if err != nil {
 				ops.Add(1)
 				errCount.Add(1)
+				errs.Record(err)
 				return
 			}
 			defer conn.Close(ctx)
@@ -45,6 +47,7 @@ func LongRunning(ctx context.Context, cfg *Config) (*Result, error) {
 			ops.Add(1)
 			if err != nil {
 				errCount.Add(1)
+				errs.Record(err)
 			}
 		}()
 	}
@@ -59,6 +62,7 @@ func LongRunning(ctx context.Context, cfg *Config) (*Result, error) {
 			if err != nil {
 				ops.Add(1)
 				errCount.Add(1)
+				errs.Record(err)
 				return
 			}
 			defer conn.Close(ctx)
@@ -67,6 +71,7 @@ func LongRunning(ctx context.Context, cfg *Config) (*Result, error) {
 			rows, err := conn.Query(ctx, "SELECT generate_series(1, 10000)")
 			if err != nil {
 				errCount.Add(1)
+				errs.Record(err)
 				ops.Add(1)
 				return
 			}
@@ -82,6 +87,7 @@ func LongRunning(ctx context.Context, cfg *Config) (*Result, error) {
 			ops.Add(1)
 			if err := rows.Err(); err != nil {
 				errCount.Add(1)
+				errs.Record(err)
 			}
 		}()
 	}
@@ -96,6 +102,7 @@ func LongRunning(ctx context.Context, cfg *Config) (*Result, error) {
 			if err != nil {
 				ops.Add(1)
 				errCount.Add(1)
+				errs.Record(err)
 				return
 			}
 			defer conn.Close(ctx)
@@ -111,6 +118,7 @@ func LongRunning(ctx context.Context, cfg *Config) (*Result, error) {
 				ops.Add(1)
 				if err != nil {
 					errCount.Add(1)
+					errs.Record(err)
 				}
 			}
 		}()
@@ -124,5 +132,6 @@ func LongRunning(ctx context.Context, cfg *Config) (*Result, error) {
 		Errors:    int(errCount.Load()),
 		Duration:  duration,
 		Latencies: latencies,
+		Notes:     errs.Notes(),
 	}, nil
 }
