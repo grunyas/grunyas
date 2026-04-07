@@ -6,6 +6,21 @@ cat > /etc/pgbouncer/userlist.txt <<EOF
 "postgres" "postgres"
 EOF
 
+# In session mode, each backend is dedicated to one client for the full session.
+# DEALLOCATE ALL drops named prepared statements (lc_0, lc_1, …) that pgx creates for
+# query description caching, preventing cross-client statement name collisions.
+#
+# In transaction mode, backends are shared across many clients, but each transaction is
+# independent and isolated. After COMMIT/ROLLBACK the backend is clean — no lingering
+# transaction state, locks, or cursors. Prepared statements are connection-scoped and
+# harmless to leave (they're actually beneficial as cache hits for repeated SQL).
+# No reset query is needed; letting pgx reuse cached descriptions improves performance.
+if [ "${POOL_MODE:-session}" = "session" ]; then
+    RESOLVED_RESET_QUERY="DEALLOCATE ALL"
+else
+    RESOLVED_RESET_QUERY=""
+fi
+
 # Generate pgbouncer.ini from environment variables
 cat > /etc/pgbouncer/pgbouncer.ini <<EOF
 ################## Auto generated ##################
@@ -29,10 +44,8 @@ ignore_startup_parameters = extra_float_digits
 # Log settings
 admin_users = postgres
 
-
-
 # Connection sanity checks, timeouts
-server_reset_query = ${SERVER_RESET_QUERY:-DISCARD ALL}
+server_reset_query = ${RESOLVED_RESET_QUERY}
 
 # TLS settings
 

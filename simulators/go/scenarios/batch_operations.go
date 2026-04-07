@@ -10,18 +10,13 @@ import (
 
 // BatchOperations tests bulk INSERT operations and multi-row queries.
 func BatchOperations(ctx context.Context, cfg *Config) (*Result, error) {
-	pool, err := NewPool(ctx, cfg)
-	if err != nil {
-		return nil, fmt.Errorf("create pool: %w", err)
-	}
-	defer pool.Close()
-
 	var (
-		ops        atomic.Int64
-		errCount   atomic.Int64
-		mu         sync.Mutex
-		latencies  []time.Duration
+		ops       atomic.Int64
+		errCount  atomic.Int64
+		mu        sync.Mutex
+		latencies []time.Duration
 	)
+	errs := NewErrorSampler(10)
 
 	start := time.Now()
 	var wg sync.WaitGroup
@@ -31,13 +26,21 @@ func BatchOperations(ctx context.Context, cfg *Config) (*Result, error) {
 		go func(workerID int) {
 			defer wg.Done()
 
+			conn, err := ConnectClient(ctx, cfg)
+			if err != nil {
+				ops.Add(1)
+				errCount.Add(1)
+				errs.Record(err)
+				return
+			}
+			defer conn.Close(ctx)
+
 			// --- Bulk INSERT using a transaction ---
 			t := time.Now()
-			tx, err := pool.Begin(ctx)
+			tx, err := conn.Begin(ctx)
 			if err != nil {
-				if !(IsCapacityError(err)) {
-					errCount.Add(1)
-				}
+				errCount.Add(1)
+				errs.Record(err)
 				ops.Add(1)
 				return
 			}
@@ -50,6 +53,7 @@ func BatchOperations(ctx context.Context, cfg *Config) (*Result, error) {
 					fmt.Sprintf(`{"worker":%d,"iter":%d}`, workerID, j))
 				if err != nil {
 					errCount.Add(1)
+					errs.Record(err)
 					break
 				}
 			}
@@ -65,14 +69,13 @@ func BatchOperations(ctx context.Context, cfg *Config) (*Result, error) {
 			mu.Unlock()
 			ops.Add(1)
 			if err != nil {
-				if !(IsCapacityError(err)) {
-					errCount.Add(1)
-				}
+				errCount.Add(1)
+				errs.Record(err)
 			}
 
 			// --- Multi-row INSERT using VALUES ---
 			t = time.Now()
-			_, err = pool.Exec(ctx,
+			_, err = conn.Exec(ctx,
 				`INSERT INTO events (type, payload) VALUES
 				 ('multi_1', '{"source":"batch"}'),
 				 ('multi_2', '{"source":"batch"}'),
@@ -85,20 +88,18 @@ func BatchOperations(ctx context.Context, cfg *Config) (*Result, error) {
 			mu.Unlock()
 			ops.Add(1)
 			if err != nil {
-				if !(IsCapacityError(err)) {
-					errCount.Add(1)
-				}
+				errCount.Add(1)
+				errs.Record(err)
 			}
 
 			// --- Bulk read ---
 			t = time.Now()
-			rows, err := pool.Query(ctx,
+			rows, err := conn.Query(ctx,
 				"SELECT id, type, payload FROM events WHERE type = $1 LIMIT 100",
 				fmt.Sprintf("batch_event_%d", workerID))
 			if err != nil {
-				if !(IsCapacityError(err)) {
-					errCount.Add(1)
-				}
+				errCount.Add(1)
+				errs.Record(err)
 				ops.Add(1)
 				return
 			}
@@ -113,9 +114,8 @@ func BatchOperations(ctx context.Context, cfg *Config) (*Result, error) {
 			mu.Unlock()
 			ops.Add(1)
 			if rows.Err() != nil {
-				if !(IsCapacityError(rows.Err())) {
-					errCount.Add(1)
-				}
+				errCount.Add(1)
+				errs.Record(rows.Err())
 			}
 		}(i)
 	}
@@ -128,5 +128,6 @@ func BatchOperations(ctx context.Context, cfg *Config) (*Result, error) {
 		Errors:    int(errCount.Load()),
 		Duration:  duration,
 		Latencies: latencies,
+		Notes:     errs.Notes(),
 	}, nil
 }

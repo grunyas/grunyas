@@ -8,21 +8,16 @@ import (
 	"time"
 )
 
-// ErrorHandling tests invalid SQL, constraint violations, and verifies connections remain usable after errors.
+// ErrorHandling tests invalid SQL, constraint violations, and verifies the connection
+// remains usable after each error — on the same persistent connection.
 func ErrorHandling(ctx context.Context, cfg *Config) (*Result, error) {
-	pool, err := NewPool(ctx, cfg)
-	if err != nil {
-		return nil, fmt.Errorf("create pool: %w", err)
-	}
-	defer pool.Close()
-
 	var (
-		ops        atomic.Int64
-		errCount   atomic.Int64
-		mu         sync.Mutex
-		latencies  []time.Duration
-		notes      []string
-		notesMu    sync.Mutex
+		ops      atomic.Int64
+		errCount atomic.Int64
+		mu       sync.Mutex
+		latencies []time.Duration
+		notes    []string
+		notesMu  sync.Mutex
 	)
 
 	start := time.Now()
@@ -33,9 +28,17 @@ func ErrorHandling(ctx context.Context, cfg *Config) (*Result, error) {
 		go func(workerID int) {
 			defer wg.Done()
 
+			conn, err := ConnectClient(ctx, cfg)
+			if err != nil {
+				ops.Add(1)
+				errCount.Add(1)
+				return
+			}
+			defer conn.Close(ctx)
+
 			// --- Invalid SQL (syntax error) ---
 			t := time.Now()
-			_, err := pool.Exec(ctx, "SELEKT invalid_syntax FROM nowhere")
+			_, err = conn.Exec(ctx, "SELEKT invalid_syntax FROM nowhere")
 			d := time.Since(t)
 			mu.Lock()
 			latencies = append(latencies, d)
@@ -51,53 +54,52 @@ func ErrorHandling(ctx context.Context, cfg *Config) (*Result, error) {
 			// --- Verify connection still works after error ---
 			t = time.Now()
 			var v int
-			err = pool.QueryRow(ctx, "SELECT 1").Scan(&v)
+			err = conn.QueryRow(ctx, "SELECT 1").Scan(&v)
 			d = time.Since(t)
 			mu.Lock()
 			latencies = append(latencies, d)
 			mu.Unlock()
 			ops.Add(1)
 			if err != nil {
-				if !(IsCapacityError(err)) {
-					errCount.Add(1)
-					notesMu.Lock()
-					if len(notes) < 5 {
-						notes = append(notes, fmt.Sprintf("connection broken after error: %v", err))
-					}
-					notesMu.Unlock()
+				errCount.Add(1)
+				notesMu.Lock()
+				if len(notes) < 5 {
+					notes = append(notes, fmt.Sprintf("connection broken after syntax error: %v", err))
 				}
+				notesMu.Unlock()
 			}
 
 			// --- Unique constraint violation ---
 			t = time.Now()
-			_, err = pool.Exec(ctx, "INSERT INTO users (name, email, balance) VALUES ($1, $2, $3)",
+			_, err = conn.Exec(ctx, "INSERT INTO users (name, email, balance) VALUES ($1, $2, $3)",
 				"dup_user", "user_1@test.com", 0) // user_1@test.com already exists from seed
 			d = time.Since(t)
 			mu.Lock()
 			latencies = append(latencies, d)
 			mu.Unlock()
 			ops.Add(1)
-			if err == nil {
-				// Could succeed if another worker deleted user_1, that's fine
-			}
+			// Not counting as error — may succeed if another worker deleted user_1
 
 			// --- Verify connection still works after constraint violation ---
 			t = time.Now()
-			err = pool.QueryRow(ctx, "SELECT 1").Scan(&v)
+			err = conn.QueryRow(ctx, "SELECT 1").Scan(&v)
 			d = time.Since(t)
 			mu.Lock()
 			latencies = append(latencies, d)
 			mu.Unlock()
 			ops.Add(1)
 			if err != nil {
-				if !(IsCapacityError(err)) {
-					errCount.Add(1)
+				errCount.Add(1)
+				notesMu.Lock()
+				if len(notes) < 5 {
+					notes = append(notes, fmt.Sprintf("connection broken after constraint violation: %v", err))
 				}
+				notesMu.Unlock()
 			}
 
 			// --- Division by zero ---
 			t = time.Now()
-			_, err = pool.Exec(ctx, "SELECT 1/0")
+			_, err = conn.Exec(ctx, "SELECT 1/0")
 			d = time.Since(t)
 			mu.Lock()
 			latencies = append(latencies, d)
@@ -109,16 +111,14 @@ func ErrorHandling(ctx context.Context, cfg *Config) (*Result, error) {
 
 			// --- Verify connection still works ---
 			t = time.Now()
-			err = pool.QueryRow(ctx, "SELECT 42").Scan(&v)
+			err = conn.QueryRow(ctx, "SELECT 42").Scan(&v)
 			d = time.Since(t)
 			mu.Lock()
 			latencies = append(latencies, d)
 			mu.Unlock()
 			ops.Add(1)
 			if err != nil || v != 42 {
-				if !(IsCapacityError(err)) {
-					errCount.Add(1)
-				}
+				errCount.Add(1)
 			}
 		}(i)
 	}

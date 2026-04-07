@@ -10,30 +10,24 @@ import (
 
 // PreparedStatements tests named and unnamed prepared statements, including reuse.
 //
-// Unnamed/parameterized queries (pool.QueryRow) work in all pool modes because
-// they use the extended query protocol with an unnamed prepared statement that is
-// re-parsed on every round-trip.
+// Unnamed/parameterized queries (conn.QueryRow) work in all pool modes because they
+// use the extended query protocol with an unnamed prepared statement that is re-parsed
+// on every round-trip.
 //
-// Named prepared statements (conn.Conn().Prepare) create server-side state that is
-// scoped to a specific backend. In transaction pool mode, the PREPARE, all
-// subsequent EXECUTEs, and the final DEALLOCATE must run within a single
-// BEGIN...COMMIT so that Grunyas keeps the same backend pinned for the entire
-// sequence. Running them across separate transactions would release the backend
-// after PREPARE, and the next EXECUTE would land on a different backend that has
-// no knowledge of the statement.
+// Named prepared statements (conn.Prepare) create server-side state scoped to a specific
+// backend. In transaction pool mode, the PREPARE, all subsequent EXECUTEs, and the final
+// DEALLOCATE must run within a single BEGIN...COMMIT so that the proxy keeps the same
+// backend pinned for the entire sequence. Outside a transaction the backend is released
+// after each ReadyForQuery, and the next statement would land on a different backend that
+// has no knowledge of the prepared statement.
 func PreparedStatements(ctx context.Context, cfg *Config) (*Result, error) {
-	pool, err := NewPool(ctx, cfg)
-	if err != nil {
-		return nil, fmt.Errorf("create pool: %w", err)
-	}
-	defer pool.Close()
-
 	var (
-		ops        atomic.Int64
-		errCount   atomic.Int64
-		mu         sync.Mutex
-		latencies  []time.Duration
+		ops       atomic.Int64
+		errCount  atomic.Int64
+		mu        sync.Mutex
+		latencies []time.Duration
 	)
+	errs := NewErrorSampler(10)
 
 	start := time.Now()
 	var wg sync.WaitGroup
@@ -43,11 +37,20 @@ func PreparedStatements(ctx context.Context, cfg *Config) (*Result, error) {
 		go func(workerID int) {
 			defer wg.Done()
 
+			conn, err := ConnectClient(ctx, cfg)
+			if err != nil {
+				ops.Add(1)
+				errCount.Add(1)
+				errs.Record(err)
+				return
+			}
+			defer conn.Close(ctx)
+
 			// --- Unnamed prepared statements (work in all pool modes) ---
 			for iter := 0; iter < 10; iter++ {
 				t := time.Now()
 				var count int
-				err := pool.QueryRow(ctx, "SELECT count(*) FROM users WHERE balance > $1",
+				err := conn.QueryRow(ctx, "SELECT count(*) FROM users WHERE balance > $1",
 					float64(iter*100)).Scan(&count)
 				d := time.Since(t)
 				mu.Lock()
@@ -55,29 +58,17 @@ func PreparedStatements(ctx context.Context, cfg *Config) (*Result, error) {
 				mu.Unlock()
 				ops.Add(1)
 				if err != nil {
-					if !(IsCapacityError(err)) {
-						errCount.Add(1)
-					}
-				}
-			}
-
-			// --- Named prepared statements via connection ---
-			// Must be wrapped in a transaction so Grunyas pins the backend for
-			// the full PREPARE → EXECUTE → DEALLOCATE sequence.
-			conn, err := pool.Acquire(ctx)
-			if err != nil {
-				if !(IsCapacityError(err)) {
 					errCount.Add(1)
+					errs.Record(err)
 				}
-				ops.Add(1)
-				return
 			}
-			defer conn.Release()
 
+			// --- Named prepared statements ---
+			// Wrapped in a transaction so the proxy pins the backend for the full
+			// PREPARE → EXECUTE × 5 → DEALLOCATE sequence (required in transaction mode).
 			if _, err := conn.Exec(ctx, "BEGIN"); err != nil {
-				if !(IsCapacityError(err)) {
-					errCount.Add(1)
-				}
+				errCount.Add(1)
+				errs.Record(err)
 				ops.Add(1)
 				return
 			}
@@ -85,16 +76,15 @@ func PreparedStatements(ctx context.Context, cfg *Config) (*Result, error) {
 
 			stmtName := fmt.Sprintf("stmt_worker_%d", workerID)
 			t := time.Now()
-			_, err = conn.Conn().Prepare(ctx, stmtName, "SELECT id, name, balance FROM users WHERE id = $1")
+			_, err = conn.Prepare(ctx, stmtName, "SELECT id, name, balance FROM users WHERE id = $1")
 			d := time.Since(t)
 			mu.Lock()
 			latencies = append(latencies, d)
 			mu.Unlock()
 			ops.Add(1)
 			if err != nil {
-				if !(IsCapacityError(err)) {
-					errCount.Add(1)
-				}
+				errCount.Add(1)
+				errs.Record(err)
 				rollback()
 				return
 			}
@@ -109,9 +99,8 @@ func PreparedStatements(ctx context.Context, cfg *Config) (*Result, error) {
 				mu.Unlock()
 				ops.Add(1)
 				if err != nil {
-					if !(IsCapacityError(err)) {
-						errCount.Add(1)
-					}
+					errCount.Add(1)
+					errs.Record(err)
 					continue
 				}
 				rows.Close()
@@ -120,15 +109,13 @@ func PreparedStatements(ctx context.Context, cfg *Config) (*Result, error) {
 			_, err = conn.Exec(ctx, "DEALLOCATE "+stmtName)
 			ops.Add(1)
 			if err != nil {
-				if !(IsCapacityError(err)) {
-					errCount.Add(1)
-				}
+				errCount.Add(1)
+				errs.Record(err)
 			}
 
 			if _, err := conn.Exec(ctx, "COMMIT"); err != nil {
-				if !(IsCapacityError(err)) {
-					errCount.Add(1)
-				}
+				errCount.Add(1)
+				errs.Record(err)
 			}
 		}(i)
 	}
@@ -141,5 +128,6 @@ func PreparedStatements(ctx context.Context, cfg *Config) (*Result, error) {
 		Errors:    int(errCount.Load()),
 		Duration:  duration,
 		Latencies: latencies,
+		Notes:     errs.Notes(),
 	}, nil
 }

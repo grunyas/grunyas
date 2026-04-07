@@ -2,7 +2,6 @@ package scenarios
 
 import (
 	"context"
-	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -11,18 +10,13 @@ import (
 
 // ConcurrentRW runs N workers doing mixed reads and writes to test isolation and data integrity.
 func ConcurrentRW(ctx context.Context, cfg *Config) (*Result, error) {
-	pool, err := NewPool(ctx, cfg)
-	if err != nil {
-		return nil, fmt.Errorf("create pool: %w", err)
-	}
-	defer pool.Close()
-
 	var (
-		ops        atomic.Int64
-		errCount   atomic.Int64
-		mu         sync.Mutex
-		latencies  []time.Duration
+		ops       atomic.Int64
+		errCount  atomic.Int64
+		mu        sync.Mutex
+		latencies []time.Duration
 	)
+	errs := NewErrorSampler(10)
 
 	start := time.Now()
 	var wg sync.WaitGroup
@@ -31,6 +25,16 @@ func ConcurrentRW(ctx context.Context, cfg *Config) (*Result, error) {
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
+
+			conn, err := ConnectClient(ctx, cfg)
+			if err != nil {
+				ops.Add(1)
+				errCount.Add(1)
+				errs.Record(err)
+				return
+			}
+			defer conn.Close(ctx)
+
 			rng := rand.New(rand.NewSource(int64(workerID)))
 
 			for iter := 0; iter < 20; iter++ {
@@ -40,16 +44,15 @@ func ConcurrentRW(ctx context.Context, cfg *Config) (*Result, error) {
 					// 70% reads
 					t := time.Now()
 					var balance float64
-					err := pool.QueryRow(ctx, "SELECT balance FROM users WHERE id = $1", userID).Scan(&balance)
+					err := conn.QueryRow(ctx, "SELECT balance FROM users WHERE id = $1", userID).Scan(&balance)
 					d := time.Since(t)
 					mu.Lock()
 					latencies = append(latencies, d)
 					mu.Unlock()
 					ops.Add(1)
 					if err != nil {
-						if !(IsCapacityError(err)) {
-							errCount.Add(1)
-						}
+						errCount.Add(1)
+						errs.Record(err)
 					}
 				} else {
 					// 30% writes — transfer balance between two users
@@ -57,11 +60,10 @@ func ConcurrentRW(ctx context.Context, cfg *Config) (*Result, error) {
 					amount := rng.Float64() * 10
 
 					t := time.Now()
-					tx, err := pool.Begin(ctx)
+					tx, err := conn.Begin(ctx)
 					if err != nil {
-						if !(IsCapacityError(err)) {
-							errCount.Add(1)
-						}
+						errCount.Add(1)
+						errs.Record(err)
 						ops.Add(1)
 						continue
 					}
@@ -69,9 +71,8 @@ func ConcurrentRW(ctx context.Context, cfg *Config) (*Result, error) {
 					_, err = tx.Exec(ctx, "UPDATE users SET balance = balance - $1 WHERE id = $2", amount, userID)
 					if err != nil {
 						_ = tx.Rollback(ctx)
-						if !(IsCapacityError(err)) {
-							errCount.Add(1)
-						}
+						errCount.Add(1)
+						errs.Record(err)
 						ops.Add(1)
 						continue
 					}
@@ -79,9 +80,8 @@ func ConcurrentRW(ctx context.Context, cfg *Config) (*Result, error) {
 					_, err = tx.Exec(ctx, "UPDATE users SET balance = balance + $1 WHERE id = $2", amount, otherID)
 					if err != nil {
 						_ = tx.Rollback(ctx)
-						if !(IsCapacityError(err)) {
-							errCount.Add(1)
-						}
+						errCount.Add(1)
+						errs.Record(err)
 						ops.Add(1)
 						continue
 					}
@@ -93,9 +93,8 @@ func ConcurrentRW(ctx context.Context, cfg *Config) (*Result, error) {
 					mu.Unlock()
 					ops.Add(1)
 					if err != nil {
-						if !(IsCapacityError(err)) {
-							errCount.Add(1)
-						}
+						errCount.Add(1)
+						errs.Record(err)
 					}
 				}
 			}
@@ -110,5 +109,6 @@ func ConcurrentRW(ctx context.Context, cfg *Config) (*Result, error) {
 		Errors:    int(errCount.Load()),
 		Duration:  duration,
 		Latencies: latencies,
+		Notes:     errs.Notes(),
 	}, nil
 }

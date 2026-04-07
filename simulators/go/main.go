@@ -89,7 +89,7 @@ func main() {
 		dbUser, dbPass, dbHost, dbPort, dbName, concurrency)
 
 	// pingStr uses pool_max_conns=1 so the readiness check doesn't occupy backend slots
-	pingStr := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?pool_max_conns=1",
+	pingStr := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?pool_max_conns=1&sslmode=disable",
 		dbUser, dbPass, dbHost, dbPort, dbName)
 
 	log.Printf("Go Simulator starting: proxy=%s pool_mode=%s concurrency=%d host=%s:%s",
@@ -163,6 +163,9 @@ func main() {
 		sr := toScenarioResult(s.name, result)
 		log.Printf("  %s: status=%s ops=%d errors=%d ops/s=%.0f",
 			s.name, sr.Status, sr.TotalOps, sr.Errors, sr.OpsPerSec)
+		for _, note := range sr.Notes {
+			log.Printf("    note: %s", note)
+		}
 		results = append(results, sr)
 	}
 

@@ -11,58 +11,49 @@ import (
 // PoolBehavior verifies connection multiplexing by tracking pg_backend_pid() across queries.
 //
 // In session mode the same backend must serve all queries on a connection (PID stable).
-// In transaction mode the backend is released after each transaction, so PIDs should change.
+// In transaction mode the backend is released after each transaction, so PIDs should change
+// across bare (autocommit) queries on the same client connection.
 //
 // Reliability requirement: the backend pool must have more than one connection. With a single
-// backend, every query on every client connection lands on the same process — PID never changes
-// even though Grunyas is correctly releasing and re-acquiring between transactions. This produces
-// a false negative in transaction mode (looks like session pinning when it isn't).
+// backend every query lands on the same process — PID never changes even though the proxy is
+// correctly releasing and re-acquiring between transactions. This produces a false negative in
+// transaction mode (looks like session pinning when it isn't).
 //
 // False-positive probability in transaction mode: if the pool has B backends and a worker runs
 // N sequential queries, the chance of seeing the same PID across all N queries is (1/B)^(N-1).
-// With B=4 backends and N=10 queries that's (1/4)^9 ≈ 0.00015% per worker — negligible in
-// practice, but the signal degrades sharply as B approaches 1.
+// With B=4 backends and N=10 queries that's (1/4)^9 ≈ 0.00015% per worker — negligible.
 func PoolBehavior(ctx context.Context, cfg *Config) (*Result, error) {
-	pool, err := NewPool(ctx, cfg)
-	if err != nil {
-		return nil, fmt.Errorf("create pool: %w", err)
-	}
-	defer pool.Close()
-
 	var (
-		ops        atomic.Int64
-		errCount   atomic.Int64
-		mu         sync.Mutex
-		latencies  []time.Duration
+		ops       atomic.Int64
+		errCount  atomic.Int64
+		mu        sync.Mutex
+		latencies []time.Duration
 	)
+	errs := NewErrorSampler(10)
 
 	type pidResult struct {
 		changed bool
 		total   int
 	}
 
-	pidResults := make([]pidResult, cfg.Concurrency)
+	workers := min(cfg.Concurrency, 50)
+	pidResults := make([]pidResult, workers)
 
 	start := time.Now()
 	var wg sync.WaitGroup
-
-	workers := min(cfg.Concurrency, 50) // limit for this scenario
 
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
 
-			// Acquire a connection and track PID across multiple queries
-			conn, err := pool.Acquire(ctx)
+			conn, err := ConnectClient(ctx, cfg)
 			if err != nil {
-				if !(IsCapacityError(err)) {
-					errCount.Add(1)
-				}
 				ops.Add(1)
+				errCount.Add(1)
 				return
 			}
-			defer conn.Release()
+			defer conn.Close(ctx)
 
 			var firstPID int
 			pids := make(map[int]bool)
@@ -77,9 +68,8 @@ func PoolBehavior(ctx context.Context, cfg *Config) (*Result, error) {
 				mu.Unlock()
 				ops.Add(1)
 				if err != nil {
-					if !(IsCapacityError(err)) {
-						errCount.Add(1)
-					}
+					errCount.Add(1)
+					errs.Record(err)
 					continue
 				}
 
@@ -105,8 +95,10 @@ func PoolBehavior(ctx context.Context, cfg *Config) (*Result, error) {
 	for i := 0; i < workers; i++ {
 		if cfg.PoolMode == "session" && pidResults[i].changed {
 			errCount.Add(1)
+			errs.Record(fmt.Errorf("session mode: worker %d saw %d different PIDs (expected 1)", i, pidResults[i].total))
 		} else if cfg.PoolMode == "transaction" && !pidResults[i].changed {
 			errCount.Add(1)
+			errs.Record(fmt.Errorf("transaction mode: worker %d saw only 1 PID (expected multiplexing)", i))
 		}
 	}
 
@@ -115,5 +107,6 @@ func PoolBehavior(ctx context.Context, cfg *Config) (*Result, error) {
 		Errors:    int(errCount.Load()),
 		Duration:  duration,
 		Latencies: latencies,
+		Notes:     errs.Notes(),
 	}, nil
 }
