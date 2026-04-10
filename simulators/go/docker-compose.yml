@@ -26,7 +26,7 @@ services:
     profiles: [grunyas]
     build:
       context: ../../
-      dockerfile: benchmark/Dockerfile
+      dockerfile: simulators/Dockerfile
     environment:
       GRUNYAS_SERVER_LISTEN_ADDR: "0.0.0.0:5711"
       GRUNYAS_SERVER_POOL_MODE: "${POOL_MODE:-session}"
@@ -42,6 +42,8 @@ services:
       GRUNYAS_BACKEND_POOL_MAX_CONNS: "${BACKEND_MAX_CONNS:-10}"
       GRUNYAS_BACKEND_POOL_MIN_CONNS: "${BACKEND_MIN_CONNS:-2}"
       GRUNYAS_LOGGING_LEVEL: "warn"
+    ports:
+      - "6060:6060"
     depends_on:
       postgres:
         condition: service_healthy
@@ -138,6 +140,7 @@ services:
       CONCURRENCY: "${CONCURRENCY:-100}"
       POOL_MODE: "${POOL_MODE:-session}"
       PROXY: "${PROXY:-grunyas}"
+      SCENARIOS: "${SCENARIOS:-}"
     volumes:
       - ./results:/app/results
     networks: [simulator]

@@ -5,3 +5,4 @@
 **/*.class
 go/simulator
 typescript/dist/
+**/*.prof

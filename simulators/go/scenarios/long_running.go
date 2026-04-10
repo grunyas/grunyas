@@ -20,8 +20,9 @@ func LongRunning(ctx context.Context, cfg *Config) (*Result, error) {
 	start := time.Now()
 	var wg sync.WaitGroup
 
-	// Limit workers to avoid too many concurrent long queries.
-	workers := min(cfg.Concurrency, 20)
+	// Limit workers so total connections (2 * workers) stays within concurrency,
+	// and cap at 20 to avoid overwhelming PostgreSQL with too many concurrent heavy queries.
+	workers := min(cfg.Concurrency/2, 20)
 
 	// pg_sleep workers — each holds its connection open for the full sleep duration.
 	for i := 0; i < workers/2; i++ {

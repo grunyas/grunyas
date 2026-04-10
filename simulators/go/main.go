@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/grunyas/simulator/scenarios"
@@ -83,6 +84,7 @@ func main() {
 	concurrency := envInt("CONCURRENCY", 100)
 	poolMode := env("POOL_MODE", "session")
 	proxy := env("PROXY", "grunyas")
+	scenarioFilter := env("SCENARIOS", "")
 
 	// connStr for scenarios — max_conns matches concurrency so each scenario can saturate the pool
 	connStr := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?pool_max_conns=%d",
@@ -147,8 +149,19 @@ func main() {
 		{"pool_behavior", scenarios.PoolBehavior},
 	}
 
+	// Optional scenario filter: SCENARIOS="basic_crud,prepared_statements"
+	allowed := map[string]bool{}
+	if scenarioFilter != "" {
+		for _, name := range strings.Split(scenarioFilter, ",") {
+			allowed[strings.TrimSpace(name)] = true
+		}
+	}
+
 	var results []ScenarioResult
 	for _, s := range allScenarios {
+		if len(allowed) > 0 && !allowed[s.name] {
+			continue
+		}
 		log.Printf("  Running scenario: %s", s.name)
 		result, err := s.fn(ctx, cfg)
 		if err != nil {
