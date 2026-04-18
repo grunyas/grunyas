@@ -88,6 +88,9 @@ func (c *Client) Startup(authMethod types.AuthMethod) (string, string, error) {
 					}); err != nil {
 						return "", "", err
 					}
+					if err := c.Flush(); err != nil {
+						return "", "", err
+					}
 
 					return "", "", fmt.Errorf("ssl connection is required")
 				}
@@ -116,6 +119,11 @@ func (c *Client) startupCleartext(user string) (string, string, error) {
 	if err := c.Send(&pgproto3.AuthenticationCleartextPassword{}); err != nil {
 		return "", "", err
 	}
+	// Flush synchronously — the client won't send its password until it sees
+	// the challenge.
+	if err := c.Flush(); err != nil {
+		return "", "", err
+	}
 
 	msg, err := c.backend.Receive()
 	if err != nil {
@@ -138,6 +146,11 @@ func (c *Client) startupMD5(user string) (string, string, error) {
 	}
 
 	if err := c.Send(&pgproto3.AuthenticationMD5Password{Salt: c.md5Salt}); err != nil {
+		return "", "", err
+	}
+	// Flush synchronously — the client won't send its password until it sees
+	// the challenge.
+	if err := c.Flush(); err != nil {
 		return "", "", err
 	}
 
@@ -166,6 +179,9 @@ func (c *Client) SASLExchange(stepFn func(string) (string, error)) error {
 	if err := c.Send(&pgproto3.AuthenticationSASL{AuthMechanisms: []string{"SCRAM-SHA-256"}}); err != nil {
 		return fmt.Errorf("send AuthenticationSASL: %w", err)
 	}
+	if err := c.Flush(); err != nil {
+		return fmt.Errorf("flush AuthenticationSASL: %w", err)
+	}
 
 	// Step 2: Receive SASLInitialResponse from client.
 	msg, err := c.backend.Receive()
@@ -186,6 +202,9 @@ func (c *Client) SASLExchange(stepFn func(string) (string, error)) error {
 	if err := c.Send(&pgproto3.AuthenticationSASLContinue{Data: []byte(serverFirst)}); err != nil {
 		return fmt.Errorf("send AuthenticationSASLContinue: %w", err)
 	}
+	if err := c.Flush(); err != nil {
+		return fmt.Errorf("flush AuthenticationSASLContinue: %w", err)
+	}
 
 	// Step 4: Receive SASLResponse (client-final message).
 	msg, err = c.backend.Receive()
@@ -205,6 +224,9 @@ func (c *Client) SASLExchange(stepFn func(string) (string, error)) error {
 
 	if err := c.Send(&pgproto3.AuthenticationSASLFinal{Data: []byte(serverFinal)}); err != nil {
 		return fmt.Errorf("send AuthenticationSASLFinal: %w", err)
+	}
+	if err := c.Flush(); err != nil {
+		return fmt.Errorf("flush AuthenticationSASLFinal: %w", err)
 	}
 
 	return nil
@@ -251,6 +273,13 @@ func (c *Client) Handshake() error {
 		return fmt.Errorf("failed to send ready for query: %w", err)
 	}
 
+	// Flush so the client sees the full welcome sequence. AuthenticationOk
+	// sent by the session right before Handshake is in the same buffer and
+	// will ride along in this single write syscall.
+	if err := c.Flush(); err != nil {
+		return fmt.Errorf("failed to flush welcome sequence: %w", err)
+	}
+
 	return nil
 }
 
@@ -258,6 +287,11 @@ func (c *Client) Receive() (pgproto3.FrontendMessage, error) {
 	return c.backend.Receive()
 }
 
+// Send buffers messages for delivery to the client. No syscall happens here —
+// the data accumulates in pgproto3.Backend's internal write buffer. Callers
+// MUST call Flush to actually transmit the data. This separation allows
+// batching multiple messages (e.g. a full query response) into a single
+// write syscall.
 func (c *Client) Send(msgs ...pgproto3.BackendMessage) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -265,6 +299,16 @@ func (c *Client) Send(msgs ...pgproto3.BackendMessage) error {
 	for _, msg := range msgs {
 		c.backend.Send(msg)
 	}
+	return nil
+}
+
+// Flush writes any buffered messages to the underlying TCP connection. This is
+// where the write syscall happens. Call at protocol boundaries such as
+// ReadyForQuery to send the accumulated response batch to the client.
+func (c *Client) Flush() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	return c.backend.Flush()
 }
 

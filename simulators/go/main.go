@@ -75,6 +75,17 @@ func envInt(key string, fallback int) int {
 	return fallback
 }
 
+func envDuration(key string, fallback time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		d, err := time.ParseDuration(v)
+		if err == nil {
+			return d
+		}
+		log.Printf("Warning: invalid %s %q: %v — using default", key, v, err)
+	}
+	return fallback
+}
+
 func main() {
 	dbHost := env("DB_HOST", "localhost")
 	dbPort := env("DB_PORT", "5711")
@@ -85,6 +96,7 @@ func main() {
 	poolMode := env("POOL_MODE", "session")
 	proxy := env("PROXY", "grunyas")
 	scenarioFilter := env("SCENARIOS", "")
+	scenarioDuration := envDuration("DURATION", 0)
 
 	// connStr for scenarios — max_conns matches concurrency so each scenario can saturate the pool
 	connStr := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?pool_max_conns=%d",
@@ -132,6 +144,11 @@ func main() {
 		DBUser:      dbUser,
 		DBPass:      dbPass,
 		DBName:      dbName,
+		Duration:    scenarioDuration,
+	}
+
+	if scenarioDuration > 0 {
+		log.Printf("Duration mode: each scenario runs for %s", scenarioDuration)
 	}
 
 	allScenarios := []struct {
@@ -163,7 +180,13 @@ func main() {
 			continue
 		}
 		log.Printf("  Running scenario: %s", s.name)
-		result, err := s.fn(ctx, cfg)
+		scenarioCtx := ctx
+		scenarioCancel := func() {}
+		if cfg.Duration > 0 {
+			scenarioCtx, scenarioCancel = context.WithTimeout(ctx, cfg.Duration)
+		}
+		result, err := s.fn(scenarioCtx, cfg)
+		scenarioCancel()
 		if err != nil {
 			log.Printf("  FAIL: %s: %v", s.name, err)
 			results = append(results, ScenarioResult{
@@ -205,9 +228,10 @@ func main() {
 		Simulator: "go",
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		Config: map[string]interface{}{
-			"proxy":       proxy,
-			"concurrency": concurrency,
-			"driver":      "pgx/v5",
+			"proxy":         proxy,
+			"concurrency":   concurrency,
+			"driver":        "pgx/v5",
+			"duration_secs": cfg.Duration.Seconds(),
 		},
 		Runs: []Run{run},
 	}

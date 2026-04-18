@@ -12,6 +12,7 @@ import (
 type mockUpstream struct{}
 
 func (m *mockUpstream) Send(msgs ...pgproto3.FrontendMessage) error { return nil }
+func (m *mockUpstream) Flush() error                                { return nil }
 func (m *mockUpstream) TxStatus() byte                              { return 'I' }
 func (m *mockUpstream) Release() error                              { return nil }
 func (m *mockUpstream) Kill() error                                 { return nil }

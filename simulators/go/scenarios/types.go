@@ -22,6 +22,23 @@ type Config struct {
 	DBUser      string
 	DBPass      string
 	DBName      string
+	// Duration controls how long throughput scenarios run.
+	// Zero means use the scenario's built-in iteration count (backward-compatible default).
+	// Positive values run the scenario until the context deadline fires.
+	Duration time.Duration
+}
+
+// Continue returns true while the worker should keep iterating.
+//
+// In duration mode (Duration > 0) it defers to ctx cancellation — main.go
+// wraps each scenario ctx with a WithTimeout so the deadline fires automatically.
+// In iteration mode (Duration == 0) it counts up to limit, preserving the
+// original fixed-iteration behaviour.
+func (c *Config) Continue(ctx context.Context, iter, limit int) bool {
+	if c.Duration > 0 {
+		return ctx.Err() == nil
+	}
+	return iter < limit
 }
 
 // Result captures the output of a single scenario run.

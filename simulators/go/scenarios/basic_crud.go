@@ -33,9 +33,12 @@ func BasicCRUD(ctx context.Context, cfg *Config) (*Result, error) {
 				errs.Record(err)
 				return
 			}
-			defer conn.Close(ctx)
+			// Use context.Background() so Terminate is sent even after the scenario
+			// deadline fires — prevents grunyas from holding zombie sessions with stale
+			// prepared-statement state that breaks subsequent trials.
+			defer conn.Close(context.Background())
 
-			for iter := 0; iter < 20; iter++ {
+			for iter := 0; cfg.Continue(ctx, iter, 20); iter++ {
 				email := fmt.Sprintf("crud_%d_%d@test.com", workerID, iter)
 
 				// INSERT
@@ -49,6 +52,9 @@ func BasicCRUD(ctx context.Context, cfg *Config) (*Result, error) {
 				mu.Unlock()
 				ops.Add(1)
 				if err != nil {
+					if ctx.Err() != nil || conn.IsClosed() {
+						return
+					}
 					errCount.Add(1)
 					errs.Record(err)
 					continue
@@ -64,6 +70,9 @@ func BasicCRUD(ctx context.Context, cfg *Config) (*Result, error) {
 				mu.Unlock()
 				ops.Add(1)
 				if err != nil {
+					if ctx.Err() != nil || conn.IsClosed() {
+						return
+					}
 					errCount.Add(1)
 					errs.Record(err)
 					continue
@@ -78,6 +87,9 @@ func BasicCRUD(ctx context.Context, cfg *Config) (*Result, error) {
 				mu.Unlock()
 				ops.Add(1)
 				if err != nil {
+					if ctx.Err() != nil || conn.IsClosed() {
+						return
+					}
 					errCount.Add(1)
 					errs.Record(err)
 					continue
@@ -92,6 +104,9 @@ func BasicCRUD(ctx context.Context, cfg *Config) (*Result, error) {
 				mu.Unlock()
 				ops.Add(1)
 				if err != nil {
+					if ctx.Err() != nil || conn.IsClosed() {
+						return
+					}
 					errCount.Add(1)
 					errs.Record(err)
 				}

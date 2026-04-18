@@ -81,6 +81,10 @@ func (m *mockUpstream) Send(msgs ...pgproto3.FrontendMessage) error {
 	return nil
 }
 
+func (m *mockUpstream) Flush() error {
+	return nil
+}
+
 func (m *mockUpstream) TxStatus() byte {
 	return 'I'
 }
@@ -125,6 +129,10 @@ func (m *mockDownstream) Send(msgs ...pgproto3.BackendMessage) error {
 	for _, msg := range msgs {
 		m.backend.Send(msg)
 	}
+	return nil
+}
+
+func (m *mockDownstream) Flush() error {
 	return m.backend.Flush()
 }
 

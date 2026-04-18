@@ -80,6 +80,10 @@ func (m *mockUpstream) Send(msgs ...pgproto3.FrontendMessage) error {
 	return nil
 }
 
+func (m *mockUpstream) Flush() error {
+	return nil
+}
+
 func (m *mockUpstream) TxStatus() byte {
 	return m.txStatus
 }

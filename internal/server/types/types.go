@@ -78,8 +78,16 @@ type PoolManagerInterface interface {
 
 // UpstreamClientInterface defines the interface for the upstream database client.
 type UpstreamClientInterface interface {
-	// Send sends the given messages to the database.
+	// Send buffers the given messages for delivery to the database. Call Flush to
+	// actually transmit them. Batching multiple Send calls before a Flush reduces
+	// the number of write syscalls per client request.
 	Send(...pgproto3.FrontendMessage) error
+
+	// Flush writes any pending buffered messages to the database connection.
+	// This is where the actual write syscall happens. Must be called at protocol
+	// boundaries (Sync, Query, Flush, CopyDone, CopyFail) so the backend can
+	// process the batched request.
+	Flush() error
 
 	// Receive reads a message from the upstream connection.
 	Receive(ctx context.Context) (pgproto3.BackendMessage, error)
@@ -126,8 +134,16 @@ type DownstreamClientInterface interface {
 	// Receive reads a message from the client.
 	Receive() (pgproto3.FrontendMessage, error)
 
-	// Send sends messages to the client.
+	// Send buffers messages for delivery to the client. Call Flush to actually
+	// transmit them. Batching multiple Send calls before a Flush reduces the
+	// number of write syscalls per query response.
 	Send(...pgproto3.BackendMessage) error
+
+	// Flush writes any pending buffered messages to the client connection.
+	// This is where the actual write syscall happens. Must be called at protocol
+	// boundaries (ReadyForQuery, ErrorResponse) so the client can process the
+	// batched response.
+	Flush() error
 
 	// Close closes the client connection.
 	Close() error

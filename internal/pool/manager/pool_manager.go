@@ -80,13 +80,15 @@ func (pm *PoolManager) AcquireDbConnection() (types.UpstreamClientInterface, err
 		return nil, err
 	}
 
-	s := pm.pool.Stat()
-	pm.logger.Debug("pool acquire succeeded",
-		zap.Int32("total_conns", s.TotalConns()),
-		zap.Int32("acquired_conns", s.AcquiredConns()),
-		zap.Int32("idle_conns", s.IdleConns()),
-		zap.Int32("max_conns", s.MaxConns()),
-	)
+	if ce := pm.logger.Check(zap.DebugLevel, "pool acquire succeeded"); ce != nil {
+		s := pm.pool.Stat()
+		ce.Write(
+			zap.Int32("total_conns", s.TotalConns()),
+			zap.Int32("acquired_conns", s.AcquiredConns()),
+			zap.Int32("idle_conns", s.IdleConns()),
+			zap.Int32("max_conns", s.MaxConns()),
+		)
+	}
 
 	return upstream_client.Initialize(sessionClient, pm.discardAll), nil
 }

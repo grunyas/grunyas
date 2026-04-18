@@ -141,6 +141,7 @@ services:
       POOL_MODE: "${POOL_MODE:-session}"
       PROXY: "${PROXY:-grunyas}"
       SCENARIOS: "${SCENARIOS:-}"
+      DURATION: "${DURATION:-}"
     volumes:
       - ./results:/app/results
     networks: [simulator]
