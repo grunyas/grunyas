@@ -20,7 +20,8 @@ type mockConn struct {
 // testableClient mirrors the SessionClient's drain and reset algorithms
 // but operates on mockConn instead of a real pgxpool connection.
 type testableClient struct {
-	conn *mockConn
+	conn       *mockConn
+	discardAll bool
 }
 
 func (t *testableClient) TxStatus() byte {
@@ -63,6 +64,7 @@ func (t *testableClient) drainToReady(ctx context.Context) error {
 func (t *testableClient) simpleQuery(ctx context.Context, query string) error {
 	t.conn.sent = append(t.conn.sent, query)
 
+	commandCompleteSeen := false
 	var queryErr error
 	for {
 		msg, err := t.Receive(ctx)
@@ -72,20 +74,24 @@ func (t *testableClient) simpleQuery(ctx context.Context, query string) error {
 
 		switch m := msg.(type) {
 		case *pgproto3.ReadyForQuery:
-			return queryErr
+			if commandCompleteSeen {
+				return queryErr
+			}
+			// Stale ReadyForQuery from a previous response — skip and keep reading.
 		case *pgproto3.CommandComplete:
-			// expected
+			commandCompleteSeen = true
 		case *pgproto3.ErrorResponse:
+			commandCompleteSeen = true
 			queryErr = fmt.Errorf("%s failed: %s %s (%s)", query, m.Severity, m.Code, m.Message)
 		}
 	}
 }
 
 func (t *testableClient) reset(ctx context.Context) error {
-	if t.TxStatus() != 'I' {
-		if err := t.drainToReady(ctx); err != nil {
-			return fmt.Errorf("drain pending messages: %w", err)
-		}
+	// Always drain — mirrors the real reset() which unconditionally sends Sync
+	// then drains to handle both stale RFQs in the buffer and mid-query interruptions.
+	if err := t.drainToReady(ctx); err != nil {
+		return fmt.Errorf("drain pending messages: %w", err)
 	}
 
 	if t.TxStatus() != 'I' {
@@ -94,8 +100,10 @@ func (t *testableClient) reset(ctx context.Context) error {
 		}
 	}
 
-	if err := t.simpleQuery(ctx, "DISCARD ALL"); err != nil {
-		return err
+	if t.discardAll {
+		if err := t.simpleQuery(ctx, "DISCARD ALL"); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -194,14 +202,21 @@ func TestSimpleQueryHandlesErrorThenRFQ(t *testing.T) {
 }
 
 func TestResetFlowIdleConnection(t *testing.T) {
-	// Connection already idle — should skip drain and rollback, go straight to DISCARD ALL.
-	tc := &testableClient{conn: &mockConn{
-		txStatus: 'I',
-		messages: []pgproto3.BackendMessage{
-			&pgproto3.CommandComplete{CommandTag: []byte("DISCARD ALL")},
-			&pgproto3.ReadyForQuery{TxStatus: 'I'},
+	// Even for an idle connection, reset() always drains first (consuming the
+	// ReadyForQuery that Sync produces), then runs DISCARD ALL in session mode.
+	tc := &testableClient{
+		discardAll: true,
+		conn: &mockConn{
+			txStatus: 'I',
+			messages: []pgproto3.BackendMessage{
+				// drain: consume the RFQ produced by the unconditional Sync
+				&pgproto3.ReadyForQuery{TxStatus: 'I'},
+				// discard all response
+				&pgproto3.CommandComplete{CommandTag: []byte("DISCARD ALL")},
+				&pgproto3.ReadyForQuery{TxStatus: 'I'},
+			},
 		},
-	}}
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -215,21 +230,24 @@ func TestResetFlowIdleConnection(t *testing.T) {
 }
 
 func TestResetFlowInTransaction(t *testing.T) {
-	// Connection in transaction — should drain, then rollback, then discard.
-	tc := &testableClient{conn: &mockConn{
-		txStatus: 'T',
-		messages: []pgproto3.BackendMessage{
-			// drain messages
-			&pgproto3.CommandComplete{CommandTag: []byte("INSERT 0 1")},
-			&pgproto3.ReadyForQuery{TxStatus: 'T'}, // still in transaction after drain
-			// rollback response
-			&pgproto3.CommandComplete{CommandTag: []byte("ROLLBACK")},
-			&pgproto3.ReadyForQuery{TxStatus: 'I'},
-			// discard all response
-			&pgproto3.CommandComplete{CommandTag: []byte("DISCARD ALL")},
-			&pgproto3.ReadyForQuery{TxStatus: 'I'},
+	// Connection in aborted transaction — drain, then rollback, then discard (session mode).
+	tc := &testableClient{
+		discardAll: true,
+		conn: &mockConn{
+			txStatus: 'T',
+			messages: []pgproto3.BackendMessage{
+				// drain messages
+				&pgproto3.CommandComplete{CommandTag: []byte("INSERT 0 1")},
+				&pgproto3.ReadyForQuery{TxStatus: 'T'}, // still in transaction after drain
+				// rollback response
+				&pgproto3.CommandComplete{CommandTag: []byte("ROLLBACK")},
+				&pgproto3.ReadyForQuery{TxStatus: 'I'},
+				// discard all response
+				&pgproto3.CommandComplete{CommandTag: []byte("DISCARD ALL")},
+				&pgproto3.ReadyForQuery{TxStatus: 'I'},
+			},
 		},
-	}}
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -245,5 +263,75 @@ func TestResetFlowInTransaction(t *testing.T) {
 	}
 	if tc.conn.sent[1] != "DISCARD ALL" {
 		t.Fatalf("expected second query to be DISCARD ALL, got %s", tc.conn.sent[1])
+	}
+}
+
+func TestResetFlowSessionMode(t *testing.T) {
+	// Session mode: discardAll=true — DISCARD ALL must run.
+	tc := &testableClient{
+		discardAll: true,
+		conn: &mockConn{
+			txStatus: 'I',
+			messages: []pgproto3.BackendMessage{
+				&pgproto3.ReadyForQuery{TxStatus: 'I'}, // drain
+				&pgproto3.CommandComplete{CommandTag: []byte("DISCARD ALL")},
+				&pgproto3.ReadyForQuery{TxStatus: 'I'},
+			},
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := tc.reset(ctx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(tc.conn.sent) != 1 || tc.conn.sent[0] != "DISCARD ALL" {
+		t.Fatalf("expected DISCARD ALL in session mode, got %v", tc.conn.sent)
+	}
+}
+
+func TestResetFlowTransactionMode(t *testing.T) {
+	// Transaction mode: discardAll=false — DISCARD ALL must NOT run.
+	tc := &testableClient{
+		discardAll: false,
+		conn: &mockConn{
+			txStatus: 'I',
+			messages: []pgproto3.BackendMessage{
+				&pgproto3.ReadyForQuery{TxStatus: 'I'}, // drain only
+			},
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := tc.reset(ctx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(tc.conn.sent) != 0 {
+		t.Fatalf("expected no queries in transaction mode, got %v", tc.conn.sent)
+	}
+}
+
+func TestSimpleQuerySkipsStaleReadyForQuery(t *testing.T) {
+	// A stale RFQ appears before our CommandComplete — simpleQuery must NOT
+	// return early on it. This guards against the bug where a previous query's
+	// unconsumed RFQ causes DISCARD ALL / ROLLBACK to never actually execute.
+	tc := &testableClient{conn: &mockConn{
+		txStatus: 'I',
+		messages: []pgproto3.BackendMessage{
+			&pgproto3.ReadyForQuery{TxStatus: 'I'},         // stale — must be skipped
+			&pgproto3.CommandComplete{CommandTag: []byte("DISCARD ALL")}, // real response
+			&pgproto3.ReadyForQuery{TxStatus: 'I'},         // real terminal RFQ
+		},
+	}}
+
+	ctx := context.Background()
+	if err := tc.simpleQuery(ctx, "DISCARD ALL"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(tc.conn.sent) != 1 || tc.conn.sent[0] != "DISCARD ALL" {
+		t.Fatalf("expected query to be sent, got %v", tc.conn.sent)
 	}
 }

@@ -35,17 +35,17 @@ func TestProcessExtendedProtocolPinning(t *testing.T) {
 		msg      pgproto3.FrontendMessage
 		wantPin  bool
 	}{
-		// Parse: only named statements pin
+		// Parse: extended-protocol Parse is never SQL PREPARE — never pins
 		{"parse unnamed", &pgproto3.Parse{Name: "", Query: "SELECT 1"}, false},
-		{"parse named", &pgproto3.Parse{Name: "stmt1", Query: "SELECT 1"}, true},
+		{"parse named", &pgproto3.Parse{Name: "stmt1", Query: "SELECT 1"}, false},
 
-		// Bind: only named prepared statements pin
+		// Bind: extended-protocol Bind never pins
 		{"bind unnamed prepared", &pgproto3.Bind{PreparedStatement: ""}, false},
-		{"bind named prepared", &pgproto3.Bind{PreparedStatement: "stmt1"}, true},
+		{"bind named prepared", &pgproto3.Bind{PreparedStatement: "stmt1"}, false},
 
-		// Describe: only named statements pin (not portals)
+		// Describe: never pins (session state created by SQL PREPARE, not extended protocol)
 		{"describe unnamed statement", &pgproto3.Describe{ObjectType: 'S', Name: ""}, false},
-		{"describe named statement", &pgproto3.Describe{ObjectType: 'S', Name: "stmt1"}, true},
+		{"describe named statement", &pgproto3.Describe{ObjectType: 'S', Name: "stmt1"}, false},
 		{"describe portal", &pgproto3.Describe{ObjectType: 'P', Name: "portal1"}, false},
 
 		// Execute: never pins

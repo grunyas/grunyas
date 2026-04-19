@@ -184,6 +184,11 @@ func (c *Client) SASLExchange(stepFn func(string) (string, error)) error {
 	}
 
 	// Step 2: Receive SASLInitialResponse from client.
+	// SetAuthType is required so that Backend.Receive decodes the 'p' message
+	// as SASLInitialResponse rather than the default PasswordMessage.
+	if err := c.backend.SetAuthType(pgproto3.AuthTypeSASL); err != nil {
+		return fmt.Errorf("set auth type SASL: %w", err)
+	}
 	msg, err := c.backend.Receive()
 	if err != nil {
 		return fmt.Errorf("receive SASLInitialResponse: %w", err)
@@ -207,6 +212,9 @@ func (c *Client) SASLExchange(stepFn func(string) (string, error)) error {
 	}
 
 	// Step 4: Receive SASLResponse (client-final message).
+	if err := c.backend.SetAuthType(pgproto3.AuthTypeSASLContinue); err != nil {
+		return fmt.Errorf("set auth type SASLContinue: %w", err)
+	}
 	msg, err = c.backend.Receive()
 	if err != nil {
 		return fmt.Errorf("receive SASLResponse: %w", err)
