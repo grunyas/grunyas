@@ -35,17 +35,17 @@ func TestProcessExtendedProtocolPinning(t *testing.T) {
 		msg      pgproto3.FrontendMessage
 		wantPin  bool
 	}{
-		// Parse: extended-protocol Parse is never SQL PREPARE — never pins
+		// Parse: named statements persist in backend session — pin to keep them reachable
 		{"parse unnamed", &pgproto3.Parse{Name: "", Query: "SELECT 1"}, false},
-		{"parse named", &pgproto3.Parse{Name: "stmt1", Query: "SELECT 1"}, false},
+		{"parse named", &pgproto3.Parse{Name: "stmt1", Query: "SELECT 1"}, true},
 
-		// Bind: extended-protocol Bind never pins
+		// Bind: pin when referencing a named prepared statement
 		{"bind unnamed prepared", &pgproto3.Bind{PreparedStatement: ""}, false},
-		{"bind named prepared", &pgproto3.Bind{PreparedStatement: "stmt1"}, false},
+		{"bind named prepared", &pgproto3.Bind{PreparedStatement: "stmt1"}, true},
 
-		// Describe: never pins (session state created by SQL PREPARE, not extended protocol)
+		// Describe: pin only for named statement Describes; portals are transient
 		{"describe unnamed statement", &pgproto3.Describe{ObjectType: 'S', Name: ""}, false},
-		{"describe named statement", &pgproto3.Describe{ObjectType: 'S', Name: "stmt1"}, false},
+		{"describe named statement", &pgproto3.Describe{ObjectType: 'S', Name: "stmt1"}, true},
 		{"describe portal", &pgproto3.Describe{ObjectType: 'P', Name: "portal1"}, false},
 
 		// Execute: never pins

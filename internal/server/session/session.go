@@ -163,12 +163,18 @@ func (sess *Session) Run() {
 			}
 
 			// Flush the accumulated response batch at protocol boundaries so
-			// the client sees the full query response in a single write. The
-			// backend always terminates a response with ReadyForQuery; we also
-			// flush on ErrorResponse to surface fatal errors without waiting
-			// for the (not-yet-received) ReadyForQuery.
+			// the client sees complete responses without waiting for the next
+			// message. RFQ terminates a Sync response; ErrorResponse surfaces
+			// fatal errors immediately. CommandComplete/PortalSuspended end an
+			// Execute; NoData/RowDescription end a Describe. These are needed
+			// so that Flush responses (which have no RFQ) are visible to the
+			// client before the subsequent Sync.
 			switch msg.(type) {
-			case *pgproto3.ReadyForQuery, *pgproto3.ErrorResponse:
+			case *pgproto3.ReadyForQuery, *pgproto3.ErrorResponse,
+				*pgproto3.CommandComplete, *pgproto3.PortalSuspended,
+				*pgproto3.NoData, *pgproto3.RowDescription,
+				*pgproto3.CloseComplete, *pgproto3.ParseComplete,
+				*pgproto3.BindComplete:
 				if err := sess.downstream.Flush(); err != nil {
 					sess.log.Error("failed to flush downstream", zap.Error(err))
 					return
