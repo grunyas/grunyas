@@ -272,7 +272,7 @@ func (c *Client) Handshake() error {
 	}
 
 	// Send BackendKeyData (dummy for now)
-	if err := c.Send(&pgproto3.BackendKeyData{ProcessID: 1234, SecretKey: 5678}); err != nil {
+	if err := c.Send(&pgproto3.BackendKeyData{ProcessID: 1234, SecretKey: make([]byte, 4)}); err != nil {
 		return fmt.Errorf("failed to send backend key data: %w", err)
 	}
 
