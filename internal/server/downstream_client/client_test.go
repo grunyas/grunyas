@@ -11,8 +11,8 @@ import (
 
 func TestHandshakeSendsWelcomeSequence(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
-	defer serverConn.Close()
-	defer clientConn.Close()
+	defer func() { _ = serverConn.Close() }()
+	defer func() { _ = clientConn.Close() }()
 
 	c := Initialize(serverConn, nil, false, zap.NewNop())
 
@@ -63,8 +63,8 @@ func TestHandshakeSendsWelcomeSequence(t *testing.T) {
 
 func TestSASLExchangeFullFlow(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
-	defer serverConn.Close()
-	defer clientConn.Close()
+	defer func() { _ = serverConn.Close() }()
+	defer func() { _ = clientConn.Close() }()
 
 	c := Initialize(serverConn, nil, false, zap.NewNop())
 
@@ -146,8 +146,8 @@ func TestSASLExchangeFullFlow(t *testing.T) {
 
 func TestSendAndFlushBatches(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
-	defer serverConn.Close()
-	defer clientConn.Close()
+	defer func() { _ = serverConn.Close() }()
+	defer func() { _ = clientConn.Close() }()
 
 	c := Initialize(serverConn, nil, false, zap.NewNop())
 

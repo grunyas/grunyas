@@ -116,6 +116,14 @@ func (m *mockDownstream) Startup(_ types.AuthMethod) (string, string, error) {
 	return "", "", nil
 }
 
+func (m *mockDownstream) MD5Salt() [4]byte {
+	return [4]byte{}
+}
+
+func (m *mockDownstream) SASLExchange(_ func(string) (string, error)) error {
+	return nil
+}
+
 func (m *mockDownstream) Handshake() error {
 	m.backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
 	return m.backend.Flush()

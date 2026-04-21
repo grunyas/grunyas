@@ -128,6 +128,14 @@ type DownstreamClientInterface interface {
 	// For AuthScramSHA256, it returns (username, "", nil) — the SASL exchange happens separately.
 	Startup(authMethod AuthMethod) (string, string, error)
 
+	// MD5Salt returns the random salt sent to the client during MD5 authentication.
+	// Only valid after Startup returns with AuthMD5.
+	MD5Salt() [4]byte
+
+	// SASLExchange performs the full SASL/SCRAM-SHA-256 handshake with the client.
+	// stepFn is called for each step of the SCRAM conversation.
+	SASLExchange(stepFn func(string) (string, error)) error
+
 	// Handshake performs the post-authentication initialization (parameter status, etc).
 	Handshake() error
 

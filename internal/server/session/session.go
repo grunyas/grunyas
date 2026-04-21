@@ -94,14 +94,14 @@ func (sess *Session) Run() {
 		return
 	}
 
-	if err := sess.srv.Authenticate(user, password); err != nil {
-		code := "28P01" // Default: invalid_password
-		if perr, ok := err.(*types.ProxyError); ok {
+	if authErr := sess.authenticate(user, password); authErr != nil {
+		code := "28P01"
+		if perr, ok := authErr.(*types.ProxyError); ok {
 			code = perr.Code
 		}
 
-		sess.log.Info("connection setup failed", zap.String("user", user), zap.String("code", code), zap.Error(err))
-		if err := sess.CloseWithError("FATAL", code, err.Error()); err != nil {
+		sess.log.Info("connection setup failed", zap.String("user", user), zap.String("code", code), zap.Error(authErr))
+		if err := sess.CloseWithError("FATAL", code, authErr.Error()); err != nil {
 			sess.log.Warn("failed to close connection", zap.Error(err))
 		}
 
@@ -347,6 +347,22 @@ func (sess *Session) CloseWithError(severity, code, message string) error {
 	}
 
 	return nil
+}
+
+func (sess *Session) authenticate(user, password string) error {
+	switch sess.srv.GetAuthMethod() {
+	case types.AuthMD5:
+		salt := sess.downstream.MD5Salt()
+		return sess.srv.AuthenticateMD5(user, password, salt)
+	case types.AuthScramSHA256:
+		scramSession, err := sess.srv.NewSCRAMSession()
+		if err != nil {
+			return &types.ProxyError{Code: "28P01", Message: err.Error()}
+		}
+		return sess.downstream.SASLExchange(scramSession.Step)
+	default:
+		return sess.srv.Authenticate(user, password)
+	}
 }
 
 func (sess *Session) acquireUpstream() error {
