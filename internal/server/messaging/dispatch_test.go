@@ -12,6 +12,7 @@ import (
 type mockUpstream struct{}
 
 func (m *mockUpstream) Send(msgs ...pgproto3.FrontendMessage) error { return nil }
+func (m *mockUpstream) Flush() error                                { return nil }
 func (m *mockUpstream) TxStatus() byte                              { return 'I' }
 func (m *mockUpstream) Release() error                              { return nil }
 func (m *mockUpstream) Kill() error                                 { return nil }
@@ -34,15 +35,15 @@ func TestProcessExtendedProtocolPinning(t *testing.T) {
 		msg      pgproto3.FrontendMessage
 		wantPin  bool
 	}{
-		// Parse: only named statements pin
+		// Parse: named statements persist in backend session — pin to keep them reachable
 		{"parse unnamed", &pgproto3.Parse{Name: "", Query: "SELECT 1"}, false},
 		{"parse named", &pgproto3.Parse{Name: "stmt1", Query: "SELECT 1"}, true},
 
-		// Bind: only named prepared statements pin
+		// Bind: pin when referencing a named prepared statement
 		{"bind unnamed prepared", &pgproto3.Bind{PreparedStatement: ""}, false},
 		{"bind named prepared", &pgproto3.Bind{PreparedStatement: "stmt1"}, true},
 
-		// Describe: only named statements pin (not portals)
+		// Describe: pin only for named statement Describes; portals are transient
 		{"describe unnamed statement", &pgproto3.Describe{ObjectType: 'S', Name: ""}, false},
 		{"describe named statement", &pgproto3.Describe{ObjectType: 'S', Name: "stmt1"}, true},
 		{"describe portal", &pgproto3.Describe{ObjectType: 'P', Name: "portal1"}, false},

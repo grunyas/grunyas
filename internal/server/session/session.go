@@ -35,7 +35,7 @@ type Session struct {
 	cancel       context.CancelFunc
 	closeOnce    sync.Once
 	ctx          context.Context
-	lastActive   atomic.Value // time.Time
+	lastActive   atomic.Int64 // unix nanoseconds; avoids atomic.Value boxing allocation on hot path
 	log          *zap.Logger
 	loopsStarted bool
 	srv          types.ProxyInterface
@@ -75,7 +75,7 @@ func Initialize(srv types.ProxyInterface, downstream types.DownstreamClientInter
 		releaseCh:     make(chan struct{}, 1),
 	}
 
-	s.lastActive.Store(time.Now())
+	s.lastActive.Store(time.Now().UnixNano())
 
 	return s
 }
@@ -94,14 +94,14 @@ func (sess *Session) Run() {
 		return
 	}
 
-	if err := sess.srv.Authenticate(user, password); err != nil {
-		code := "28P01" // Default: invalid_password
-		if perr, ok := err.(*types.ProxyError); ok {
+	if authErr := sess.authenticate(user, password); authErr != nil {
+		code := "28P01"
+		if perr, ok := authErr.(*types.ProxyError); ok {
 			code = perr.Code
 		}
 
-		sess.log.Info("connection setup failed", zap.String("user", user), zap.String("code", code), zap.Error(err))
-		if err := sess.CloseWithError("FATAL", code, err.Error()); err != nil {
+		sess.log.Info("connection setup failed", zap.String("user", user), zap.String("code", code), zap.Error(authErr))
+		if err := sess.CloseWithError("FATAL", code, authErr.Error()); err != nil {
 			sess.log.Warn("failed to close connection", zap.Error(err))
 		}
 
@@ -152,12 +152,33 @@ func (sess *Session) Run() {
 	for {
 		select {
 		case msg := <-sess.upstreamCh:
-			sess.lastActive.Store(time.Now())
-			sess.log.Debug("upstream message received", zap.Any("message", msg))
+			sess.lastActive.Store(time.Now().UnixNano())
+			if ce := sess.log.Check(zap.DebugLevel, "upstream message received"); ce != nil {
+				ce.Write(zap.Any("message", msg))
+			}
 
 			if err := sess.downstream.Send(msg); err != nil {
 				sess.log.Error("failed to send message", zap.Error(err))
 				return
+			}
+
+			// Flush the accumulated response batch at protocol boundaries so
+			// the client sees complete responses without waiting for the next
+			// message. RFQ terminates a Sync response; ErrorResponse surfaces
+			// fatal errors immediately. CommandComplete/PortalSuspended end an
+			// Execute; NoData/RowDescription end a Describe. These are needed
+			// so that Flush responses (which have no RFQ) are visible to the
+			// client before the subsequent Sync.
+			switch msg.(type) {
+			case *pgproto3.ReadyForQuery, *pgproto3.ErrorResponse,
+				*pgproto3.CommandComplete, *pgproto3.PortalSuspended,
+				*pgproto3.NoData, *pgproto3.RowDescription,
+				*pgproto3.CloseComplete, *pgproto3.ParseComplete,
+				*pgproto3.BindComplete:
+				if err := sess.downstream.Flush(); err != nil {
+					sess.log.Error("failed to flush downstream", zap.Error(err))
+					return
+				}
 			}
 
 			shouldDetach := false
@@ -184,14 +205,16 @@ func (sess *Session) Run() {
 				return
 			}
 
-			sess.lastActive.Store(time.Now())
+			sess.lastActive.Store(time.Now().UnixNano())
 
 			if _, ok := msg.(*pgproto3.Terminate); ok {
 				sess.log.Info("client terminated session")
 				return
 			}
 
-			sess.log.Debug("downstream message received", zap.Any("message", msg))
+			if ce := sess.log.Check(zap.DebugLevel, "downstream message received"); ce != nil {
+				ce.Write(zap.Any("message", msg))
+			}
 
 			if err := sess.acquireUpstream(); err != nil {
 				code := "53300"
@@ -212,6 +235,20 @@ func (sess *Session) Run() {
 			}
 			if switchMode {
 				sess.switchToSessionMode("session state detected")
+			}
+
+			// Flush the accumulated request batch at protocol boundaries so
+			// the backend starts processing. Extended protocol messages
+			// (Parse, Bind, Describe, Execute, Close) are only processed
+			// when Sync or Flush is received; simple Query messages trigger
+			// immediate processing. CopyDone and CopyFail terminate a
+			// COPY IN stream and must flush so the backend can finalize.
+			switch msg.(type) {
+			case *pgproto3.Query, *pgproto3.Sync, *pgproto3.Flush, *pgproto3.CopyDone, *pgproto3.CopyFail:
+				if err := sess.upstream.Flush(); err != nil {
+					sess.log.Error("failed to flush upstream", zap.Error(err))
+					return
+				}
 			}
 
 			// Signal read loop that buffer can be reused
@@ -242,13 +279,11 @@ func (sess *Session) ID() uint64 {
 // LastActive returns the time of the most recent activity in this session.
 // This is used by the idle sweeper to determine if the session should be terminated.
 func (sess *Session) LastActive() time.Time {
-	v := sess.lastActive.Load()
-
-	if t, ok := v.(time.Time); ok {
-		return t
+	ns := sess.lastActive.Load()
+	if ns == 0 {
+		return time.Time{}
 	}
-
-	return time.Time{}
+	return time.Unix(0, ns)
 }
 
 // Close gracefully terminates the session.
@@ -302,10 +337,32 @@ func (sess *Session) CloseWithError(severity, code, message string) error {
 		Code:     code,
 		Message:  message,
 	}); err != nil {
+		sess.log.Warn("failed to buffer error message before closing", zap.Error(err))
+	}
+	// Flush synchronously — CloseWithError is the last thing the client will
+	// see on this connection, so we must push the error out of the buffer
+	// before Close() tears down the socket.
+	if err := sess.downstream.Flush(); err != nil {
 		sess.log.Warn("failed to flush error message before closing", zap.Error(err))
 	}
 
 	return nil
+}
+
+func (sess *Session) authenticate(user, password string) error {
+	switch sess.srv.GetAuthMethod() {
+	case types.AuthMD5:
+		salt := sess.downstream.MD5Salt()
+		return sess.srv.AuthenticateMD5(user, password, salt)
+	case types.AuthScramSHA256:
+		scramSession, err := sess.srv.NewSCRAMSession()
+		if err != nil {
+			return &types.ProxyError{Code: "28P01", Message: err.Error()}
+		}
+		return sess.downstream.SASLExchange(scramSession.Step)
+	default:
+		return sess.srv.Authenticate(user, password)
+	}
 }
 
 func (sess *Session) acquireUpstream() error {

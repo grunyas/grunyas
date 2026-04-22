@@ -22,6 +22,9 @@ import (
 // False-positive probability in transaction mode: if the pool has B backends and a worker runs
 // N sequential queries, the chance of seeing the same PID across all N queries is (1/B)^(N-1).
 // With B=4 backends and N=10 queries that's (1/4)^9 ≈ 0.00015% per worker — negligible.
+//
+// In duration mode the PID correctness check runs once per worker, then each worker enters a
+// steady-state throughput loop issuing pg_backend_pid() queries until the deadline expires.
 func PoolBehavior(ctx context.Context, cfg *Config) (*Result, error) {
 	var (
 		ops       atomic.Int64
@@ -53,11 +56,10 @@ func PoolBehavior(ctx context.Context, cfg *Config) (*Result, error) {
 				errCount.Add(1)
 				return
 			}
-			defer conn.Close(ctx)
+			defer conn.Close(context.Background())
 
-			var firstPID int
+			// --- One-shot PID correctness check (10 queries) ---
 			pids := make(map[int]bool)
-
 			for iter := 0; iter < 10; iter++ {
 				t := time.Now()
 				var pid int
@@ -68,22 +70,38 @@ func PoolBehavior(ctx context.Context, cfg *Config) (*Result, error) {
 				mu.Unlock()
 				ops.Add(1)
 				if err != nil {
+					if ctx.Err() != nil || conn.IsClosed() {
+						return
+					}
 					errCount.Add(1)
 					errs.Record(err)
 					continue
 				}
-
 				pids[pid] = true
-				if iter == 0 {
-					firstPID = pid
-				}
 			}
-
 			pidResults[workerID] = pidResult{
 				changed: len(pids) > 1,
 				total:   len(pids),
 			}
-			_ = firstPID
+
+			// --- Steady-state throughput loop (duration mode) ---
+			for iter := 0; cfg.Continue(ctx, iter, 0); iter++ {
+				t := time.Now()
+				var pid int
+				err := conn.QueryRow(ctx, "SELECT pg_backend_pid()").Scan(&pid)
+				d := time.Since(t)
+				mu.Lock()
+				latencies = append(latencies, d)
+				mu.Unlock()
+				ops.Add(1)
+				if err != nil {
+					if ctx.Err() != nil || conn.IsClosed() {
+						return
+					}
+					errCount.Add(1)
+					errs.Record(err)
+				}
+			}
 		}(i)
 	}
 

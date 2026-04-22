@@ -23,7 +23,7 @@ services:
   grunyas:
     build:
       context: ../../
-      dockerfile: benchmark/Dockerfile
+      dockerfile: simulators/Dockerfile
     environment:
       GRUNYAS_SERVER_LISTEN_ADDR: "0.0.0.0:5711"
       GRUNYAS_SERVER_POOL_MODE: "${POOL_MODE:-session}"

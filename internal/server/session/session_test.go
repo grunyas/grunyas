@@ -10,9 +10,11 @@ import (
 	"time"
 
 	"github.com/grunyas/grunyas/config"
+	"github.com/grunyas/grunyas/internal/auth"
 	"github.com/grunyas/grunyas/internal/server/downstream_client"
 	"github.com/grunyas/grunyas/internal/server/types"
 	"github.com/jackc/pgx/v5/pgproto3"
+	"github.com/xdg-go/scram"
 	"go.uber.org/zap"
 )
 
@@ -22,6 +24,7 @@ type mockProxyServer struct {
 	cfg         *config.Config
 	upstream    *mockUpstream
 	acquireFunc func() (types.UpstreamClientInterface, error)
+	authn       *auth.Authenticator
 }
 
 func (m *mockProxyServer) GetContext() context.Context {
@@ -41,18 +44,30 @@ func (m *mockProxyServer) PoolStats() types.PoolStats {
 }
 
 func (m *mockProxyServer) GetAuthMethod() types.AuthMethod {
+	if m.authn != nil {
+		return m.authn.Method()
+	}
 	return types.AuthPlain
 }
 
 func (m *mockProxyServer) Authenticate(user, password string) error {
+	if m.authn != nil {
+		return m.authn.Authenticate(user, password)
+	}
 	return nil
 }
 
 func (m *mockProxyServer) AuthenticateMD5(user, clientHash string, salt [4]byte) error {
+	if m.authn != nil {
+		return m.authn.AuthenticateMD5(user, clientHash, salt)
+	}
 	return nil
 }
 
 func (m *mockProxyServer) NewSCRAMSession() (types.SCRAMSession, error) {
+	if m.authn != nil {
+		return m.authn.NewSCRAMSession()
+	}
 	return nil, fmt.Errorf("SCRAM not configured in mock")
 }
 
@@ -77,6 +92,10 @@ func (m *mockUpstream) SendSimpleQuery(ctx context.Context, query string) (types
 }
 
 func (m *mockUpstream) Send(msgs ...pgproto3.FrontendMessage) error {
+	return nil
+}
+
+func (m *mockUpstream) Flush() error {
 	return nil
 }
 
@@ -835,5 +854,313 @@ func TestSessionTransactionPoolingAcquireFailureSendsFatal(t *testing.T) {
 		t.Fatalf("unexpected error message: %s", errResp.Message)
 	}
 
+	waitDone(t, done)
+}
+
+// startSessionWithAuthenticator starts a session using a real auth.Authenticator and returns
+// the raw client connection without performing any auth exchange, so the caller can drive it.
+func startSessionWithAuthenticator(t *testing.T, parent context.Context, authn *auth.Authenticator) (*Session, net.Conn, <-chan struct{}, func()) {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to create listener: %v", err)
+	}
+
+	serverConnCh := make(chan net.Conn, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		serverConnCh <- conn
+	}()
+
+	clientConn, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("failed to dial: %v", err)
+	}
+
+	serverConn := <-serverConnCh
+	_ = listener.Close()
+
+	defaultCfg := config.Default()
+	mockSrv := &mockProxyServer{
+		ctx:   parent,
+		log:   zap.NewNop(),
+		cfg:   &defaultCfg,
+		authn: authn,
+		upstream: &mockUpstream{
+			txStatus:  'I',
+			responses: make(chan pgproto3.BackendMessage, 64),
+		},
+	}
+
+	down := downstream_client.Initialize(serverConn, nil, false, zap.NewNop())
+	sess := Initialize(mockSrv, down)
+
+	done := make(chan struct{})
+	go func() {
+		sess.Run()
+		close(done)
+	}()
+
+	return sess, clientConn, done, func() {
+		_ = clientConn.Close()
+		_ = serverConn.Close()
+	}
+}
+
+func doPlainAuthExchange(t *testing.T, conn net.Conn, user, password string) error {
+	t.Helper()
+	frontend := pgproto3.NewFrontend(conn, conn)
+
+	frontend.Send(&pgproto3.StartupMessage{
+		ProtocolVersion: pgproto3.ProtocolVersionNumber,
+		Parameters:      map[string]string{"user": user},
+	})
+	if err := frontend.Flush(); err != nil {
+		t.Fatalf("flush startup: %v", err)
+	}
+
+	msg, err := frontend.Receive()
+	if err != nil {
+		t.Fatalf("receive auth challenge: %v", err)
+	}
+	if _, ok := msg.(*pgproto3.AuthenticationCleartextPassword); !ok {
+		t.Fatalf("expected AuthenticationCleartextPassword, got %T", msg)
+	}
+
+	frontend.Send(&pgproto3.PasswordMessage{Password: password})
+	if err := frontend.Flush(); err != nil {
+		t.Fatalf("flush password: %v", err)
+	}
+
+	msg, err = frontend.Receive()
+	if err != nil {
+		return err
+	}
+	if errResp, ok := msg.(*pgproto3.ErrorResponse); ok {
+		return fmt.Errorf("%s: %s", errResp.Code, errResp.Message)
+	}
+	if _, ok := msg.(*pgproto3.AuthenticationOk); !ok {
+		t.Fatalf("expected AuthenticationOk or ErrorResponse, got %T", msg)
+	}
+	consumeWelcome(t, frontend)
+	return nil
+}
+
+func doMD5AuthExchange(t *testing.T, conn net.Conn, user, password string) error {
+	t.Helper()
+	frontend := pgproto3.NewFrontend(conn, conn)
+
+	frontend.Send(&pgproto3.StartupMessage{
+		ProtocolVersion: pgproto3.ProtocolVersionNumber,
+		Parameters:      map[string]string{"user": user},
+	})
+	if err := frontend.Flush(); err != nil {
+		t.Fatalf("flush startup: %v", err)
+	}
+
+	msg, err := frontend.Receive()
+	if err != nil {
+		t.Fatalf("receive auth challenge: %v", err)
+	}
+	challenge, ok := msg.(*pgproto3.AuthenticationMD5Password)
+	if !ok {
+		t.Fatalf("expected AuthenticationMD5Password, got %T", msg)
+	}
+
+	hash := downstream_client.ComputeMD5Password(user, password, challenge.Salt)
+	frontend.Send(&pgproto3.PasswordMessage{Password: hash})
+	if err := frontend.Flush(); err != nil {
+		t.Fatalf("flush password: %v", err)
+	}
+
+	msg, err = frontend.Receive()
+	if err != nil {
+		return err
+	}
+	if errResp, ok := msg.(*pgproto3.ErrorResponse); ok {
+		return fmt.Errorf("%s: %s", errResp.Code, errResp.Message)
+	}
+	if _, ok := msg.(*pgproto3.AuthenticationOk); !ok {
+		t.Fatalf("expected AuthenticationOk or ErrorResponse, got %T", msg)
+	}
+	consumeWelcome(t, frontend)
+	return nil
+}
+
+func doSCRAMAuthExchange(t *testing.T, conn net.Conn, user, password string) error {
+	t.Helper()
+	frontend := pgproto3.NewFrontend(conn, conn)
+
+	frontend.Send(&pgproto3.StartupMessage{
+		ProtocolVersion: pgproto3.ProtocolVersionNumber,
+		Parameters:      map[string]string{"user": user},
+	})
+	if err := frontend.Flush(); err != nil {
+		t.Fatalf("flush startup: %v", err)
+	}
+
+	msg, err := frontend.Receive()
+	if err != nil {
+		t.Fatalf("receive SASL: %v", err)
+	}
+	if _, ok := msg.(*pgproto3.AuthenticationSASL); !ok {
+		t.Fatalf("expected AuthenticationSASL, got %T", msg)
+	}
+
+	client, err := scram.SHA256.NewClient(user, password, "")
+	if err != nil {
+		t.Fatalf("create SCRAM client: %v", err)
+	}
+	conv := client.NewConversation()
+
+	clientFirst, err := conv.Step("")
+	if err != nil {
+		t.Fatalf("SCRAM step 1: %v", err)
+	}
+
+	frontend.Send(&pgproto3.SASLInitialResponse{AuthMechanism: "SCRAM-SHA-256", Data: []byte(clientFirst)})
+	if err := frontend.Flush(); err != nil {
+		t.Fatalf("flush SASLInitialResponse: %v", err)
+	}
+
+	msg, err = frontend.Receive()
+	if err != nil {
+		return err
+	}
+	if errResp, ok := msg.(*pgproto3.ErrorResponse); ok {
+		return fmt.Errorf("%s: %s", errResp.Code, errResp.Message)
+	}
+	cont, ok := msg.(*pgproto3.AuthenticationSASLContinue)
+	if !ok {
+		t.Fatalf("expected AuthenticationSASLContinue, got %T", msg)
+	}
+
+	clientFinal, err := conv.Step(string(cont.Data))
+	if err != nil {
+		t.Fatalf("SCRAM step 2: %v", err)
+	}
+
+	frontend.Send(&pgproto3.SASLResponse{Data: []byte(clientFinal)})
+	if err := frontend.Flush(); err != nil {
+		t.Fatalf("flush SASLResponse: %v", err)
+	}
+
+	msg, err = frontend.Receive()
+	if err != nil {
+		return err
+	}
+	if errResp, ok := msg.(*pgproto3.ErrorResponse); ok {
+		return fmt.Errorf("%s: %s", errResp.Code, errResp.Message)
+	}
+	final, ok := msg.(*pgproto3.AuthenticationSASLFinal)
+	if !ok {
+		t.Fatalf("expected AuthenticationSASLFinal, got %T", msg)
+	}
+
+	if _, err := conv.Step(string(final.Data)); err != nil {
+		return fmt.Errorf("server verification: %w", err)
+	}
+
+	msg, err = frontend.Receive()
+	if err != nil {
+		return err
+	}
+	if errResp, ok := msg.(*pgproto3.ErrorResponse); ok {
+		return fmt.Errorf("%s: %s", errResp.Code, errResp.Message)
+	}
+	if _, ok := msg.(*pgproto3.AuthenticationOk); !ok {
+		t.Fatalf("expected AuthenticationOk, got %T", msg)
+	}
+	consumeWelcome(t, frontend)
+	return nil
+}
+
+func newTestAuth(t *testing.T, method string) *auth.Authenticator {
+	t.Helper()
+	authn, err := auth.Initialize(config.AuthConfig{
+		Method: method, Username: "postgres", Password: "postgres",
+	}, zap.NewNop())
+	if err != nil {
+		t.Fatalf("init auth: %v", err)
+	}
+	return authn
+}
+
+func TestSessionAuthPlain_Success(t *testing.T) {
+	_, clientConn, done, cleanup := startSessionWithAuthenticator(t, t.Context(), newTestAuth(t, "plain"))
+	defer cleanup()
+
+	if err := doPlainAuthExchange(t, clientConn, "postgres", "postgres"); err != nil {
+		t.Fatalf("plain auth should succeed: %v", err)
+	}
+	_ = clientConn.Close()
+	waitDone(t, done)
+}
+
+func TestSessionAuthPlain_WrongPassword(t *testing.T) {
+	_, clientConn, done, cleanup := startSessionWithAuthenticator(t, t.Context(), newTestAuth(t, "plain"))
+	defer cleanup()
+
+	err := doPlainAuthExchange(t, clientConn, "postgres", "wrong")
+	if err == nil {
+		t.Fatal("expected plain auth to fail with wrong password")
+	}
+	if !strings.Contains(err.Error(), "28P01") {
+		t.Fatalf("expected error code 28P01, got: %v", err)
+	}
+	waitDone(t, done)
+}
+
+func TestSessionAuthMD5_Success(t *testing.T) {
+	_, clientConn, done, cleanup := startSessionWithAuthenticator(t, t.Context(), newTestAuth(t, "md5"))
+	defer cleanup()
+
+	if err := doMD5AuthExchange(t, clientConn, "postgres", "postgres"); err != nil {
+		t.Fatalf("MD5 auth should succeed: %v", err)
+	}
+	_ = clientConn.Close()
+	waitDone(t, done)
+}
+
+func TestSessionAuthMD5_WrongPassword(t *testing.T) {
+	_, clientConn, done, cleanup := startSessionWithAuthenticator(t, t.Context(), newTestAuth(t, "md5"))
+	defer cleanup()
+
+	err := doMD5AuthExchange(t, clientConn, "postgres", "wrong")
+	if err == nil {
+		t.Fatal("expected MD5 auth to fail with wrong password")
+	}
+	if !strings.Contains(err.Error(), "28P01") {
+		t.Fatalf("expected error code 28P01, got: %v", err)
+	}
+	waitDone(t, done)
+}
+
+func TestSessionAuthSCRAM_Success(t *testing.T) {
+	_, clientConn, done, cleanup := startSessionWithAuthenticator(t, t.Context(), newTestAuth(t, "scram-sha-256"))
+	defer cleanup()
+
+	if err := doSCRAMAuthExchange(t, clientConn, "postgres", "postgres"); err != nil {
+		t.Fatalf("SCRAM auth should succeed: %v", err)
+	}
+	_ = clientConn.Close()
+	waitDone(t, done)
+}
+
+func TestSessionAuthSCRAM_WrongPassword(t *testing.T) {
+	_, clientConn, done, cleanup := startSessionWithAuthenticator(t, t.Context(), newTestAuth(t, "scram-sha-256"))
+	defer cleanup()
+
+	err := doSCRAMAuthExchange(t, clientConn, "postgres", "wrong")
+	if err == nil {
+		t.Fatal("expected SCRAM auth to fail with wrong password")
+	}
+	if !strings.Contains(err.Error(), "28P01") {
+		t.Fatalf("expected error code 28P01, got: %v", err)
+	}
 	waitDone(t, done)
 }

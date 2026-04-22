@@ -235,7 +235,13 @@ func (prx *Proxy) handleNewIncomingConnection(conn net.Conn) {
 			Code:     "53300", // too_many_connections
 			Message:  "connection pool exhausted, please try again later",
 		}); err != nil {
-			prx.logger.Warn("failed to send error response", zap.Error(err))
+			prx.logger.Warn("failed to buffer error response", zap.Error(err))
+		}
+		// Flush synchronously so the client sees the error before we drop
+		// the socket. Without this, Send just writes to the internal buffer
+		// and Close() would discard it.
+		if err := downstream.Flush(); err != nil {
+			prx.logger.Warn("failed to flush error response", zap.Error(err))
 		}
 
 		downstream.Close() //nolint:errcheck

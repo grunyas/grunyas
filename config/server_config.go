@@ -40,6 +40,10 @@ type ServerConfig struct {
 	// Supported values: "session", "transaction".
 	// Default: "session".
 	PoolMode PoolMode `mapstructure:"pool_mode"`
+
+	// PprofAddr enables the Go pprof HTTP server on the given address.
+	// Example: "0.0.0.0:6060". If empty (default), pprof is disabled.
+	PprofAddr string `mapstructure:"pprof_addr"`
 }
 
 type PoolMode string

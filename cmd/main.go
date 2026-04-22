@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
+	_ "net/http/pprof"
+	"runtime"
 	"os"
 	"os/signal"
 	"strings"
@@ -68,6 +71,17 @@ func main() {
 	}
 	defer cleanup(context.Background()) //nolint:errcheck
 
+	if addr := cfg.ServerConfig.PprofAddr; addr != "" {
+		runtime.SetBlockProfileRate(1)    // record every block event
+		runtime.SetMutexProfileFraction(1) // record every mutex contention event
+		go func() {
+			logger.Info("pprof server listening", zap.String("addr", addr))
+			if err := http.ListenAndServe(addr, nil); err != nil {
+				logger.Warn("pprof server error", zap.Error(err))
+			}
+		}()
+	}
+
 	srv := proxy.Initialize(ctx, &cfg, logger)
 
 	// Run server in background (since it blocks)
@@ -99,6 +113,7 @@ func bindEnvKeys() {
 		"server.ssl_cert",
 		"server.ssl_key",
 		"server.pool_mode",
+		"server.pprof_addr",
 		"logging.level",
 		"logging.development",
 		"telemetry.otlp_endpoint",

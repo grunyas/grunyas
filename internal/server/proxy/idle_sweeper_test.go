@@ -81,6 +81,10 @@ func (m *mockUpstream) Send(msgs ...pgproto3.FrontendMessage) error {
 	return nil
 }
 
+func (m *mockUpstream) Flush() error {
+	return nil
+}
+
 func (m *mockUpstream) TxStatus() byte {
 	return 'I'
 }
@@ -112,6 +116,14 @@ func (m *mockDownstream) Startup(_ types.AuthMethod) (string, string, error) {
 	return "", "", nil
 }
 
+func (m *mockDownstream) MD5Salt() [4]byte {
+	return [4]byte{}
+}
+
+func (m *mockDownstream) SASLExchange(_ func(string) (string, error)) error {
+	return nil
+}
+
 func (m *mockDownstream) Handshake() error {
 	m.backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
 	return m.backend.Flush()
@@ -125,6 +137,10 @@ func (m *mockDownstream) Send(msgs ...pgproto3.BackendMessage) error {
 	for _, msg := range msgs {
 		m.backend.Send(msg)
 	}
+	return nil
+}
+
+func (m *mockDownstream) Flush() error {
 	return m.backend.Flush()
 }
 

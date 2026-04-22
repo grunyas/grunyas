@@ -10,4 +10,5 @@ FROM alpine:3.20
 RUN apk add --no-cache ca-certificates
 WORKDIR /app
 COPY --from=builder /app/grunyas .
+ENV GRUNYAS_SERVER_PPROF_ADDR=0.0.0.0:6060
 CMD ["./grunyas", "-no-console"]

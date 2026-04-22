@@ -11,6 +11,9 @@ import (
 // Each goroutine opens a fresh connection, runs one query, and closes immediately.
 // The storm intentionally spawns 2× the configured concurrency to exceed the backend pool size,
 // so capacity rejections (SQLSTATE 53300) are expected and filtered out.
+//
+// In duration mode each goroutine keeps storming (connect/query/close) until the deadline expires.
+// In iteration mode each goroutine performs a single storm cycle (original behaviour).
 func ConnectionStorms(ctx context.Context, cfg *Config) (*Result, error) {
 	var (
 		ops       atomic.Int64
@@ -29,34 +32,41 @@ func ConnectionStorms(ctx context.Context, cfg *Config) (*Result, error) {
 		go func() {
 			defer wg.Done()
 
-			t := time.Now()
-			conn, err := ConnectClient(ctx, cfg)
-			if err != nil {
-				// Capacity rejections are expected when exceeding the backend pool size.
-				if !IsCapacityError(err) {
-					errCount.Add(1)
-					errs.Record(err)
+			for iter := 0; cfg.Continue(ctx, iter, 1); iter++ {
+				t := time.Now()
+				conn, err := ConnectClient(ctx, cfg)
+				if err != nil {
+					// Capacity rejections are expected when exceeding the backend pool size.
+					if !IsCapacityError(err) {
+						if ctx.Err() != nil {
+							return
+						}
+						errCount.Add(1)
+						errs.Record(err)
+					}
+					ops.Add(1)
+					continue
 				}
+
+				// conn.Exec with no parameters uses the simple protocol (single Query message),
+				// bypassing the extended query protocol entirely — correct in both pool modes.
+				_, err = conn.Exec(ctx, "SELECT 1")
 				ops.Add(1)
-				return
-			}
-
-			// conn.Exec with no parameters uses the simple protocol (single Query message),
-			// bypassing the extended query protocol entirely — correct in both pool modes.
-			_, err = conn.Exec(ctx, "SELECT 1")
-			ops.Add(1)
-			if err != nil {
-				if !IsCapacityError(err) {
-					errCount.Add(1)
-					errs.Record(err)
+				if err != nil {
+					if !IsCapacityError(err) {
+						if ctx.Err() == nil && !conn.IsClosed() {
+							errCount.Add(1)
+							errs.Record(err)
+						}
+					}
 				}
-			}
 
-			_ = conn.Close(ctx)
-			d := time.Since(t)
-			mu.Lock()
-			latencies = append(latencies, d)
-			mu.Unlock()
+				_ = conn.Close(context.Background())
+				d := time.Since(t)
+				mu.Lock()
+				latencies = append(latencies, d)
+				mu.Unlock()
+			}
 		}()
 	}
 

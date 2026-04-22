@@ -37,13 +37,16 @@ func Transactions(ctx context.Context, cfg *Config) (*Result, error) {
 				errs.Record(err)
 				return
 			}
-			defer conn.Close(ctx)
+			defer conn.Close(context.Background())
 
-			for iter := 0; iter < 10; iter++ {
+			for iter := 0; cfg.Continue(ctx, iter, 10); iter++ {
 				// --- Commit flow ---
 				t := time.Now()
 				tx, err := conn.Begin(ctx)
 				if err != nil {
+					if ctx.Err() != nil || conn.IsClosed() {
+						return
+					}
 					errCount.Add(1)
 					errs.Record(err)
 					ops.Add(1)
@@ -54,7 +57,10 @@ func Transactions(ctx context.Context, cfg *Config) (*Result, error) {
 				_, err = tx.Exec(ctx, "INSERT INTO users (name, email, balance) VALUES ($1, $2, $3)",
 					fmt.Sprintf("tx_user_%d_%d", workerID, iter), email, 500.00)
 				if err != nil {
-					_ = tx.Rollback(ctx)
+					_ = tx.Rollback(context.Background())
+					if ctx.Err() != nil || conn.IsClosed() {
+						return
+					}
 					errCount.Add(1)
 					errs.Record(err)
 					ops.Add(1)
@@ -68,6 +74,9 @@ func Transactions(ctx context.Context, cfg *Config) (*Result, error) {
 				mu.Unlock()
 				ops.Add(1)
 				if err != nil {
+					if ctx.Err() != nil || conn.IsClosed() {
+						return
+					}
 					errCount.Add(1)
 					errs.Record(err)
 				}
@@ -76,6 +85,9 @@ func Transactions(ctx context.Context, cfg *Config) (*Result, error) {
 				t = time.Now()
 				tx, err = conn.Begin(ctx)
 				if err != nil {
+					if ctx.Err() != nil || conn.IsClosed() {
+						return
+					}
 					errCount.Add(1)
 					errs.Record(err)
 					ops.Add(1)
@@ -85,13 +97,16 @@ func Transactions(ctx context.Context, cfg *Config) (*Result, error) {
 				_, _ = tx.Exec(ctx, "INSERT INTO users (name, email, balance) VALUES ($1, $2, $3)",
 					"will_rollback", fmt.Sprintf("rb_%d_%d@test.com", workerID, iter), 999.99)
 
-				err = tx.Rollback(ctx)
+				err = tx.Rollback(context.Background())
 				d = time.Since(t)
 				mu.Lock()
 				latencies = append(latencies, d)
 				mu.Unlock()
 				ops.Add(1)
 				if err != nil {
+					if ctx.Err() != nil || conn.IsClosed() {
+						return
+					}
 					errCount.Add(1)
 					errs.Record(err)
 				}
@@ -100,6 +115,9 @@ func Transactions(ctx context.Context, cfg *Config) (*Result, error) {
 				t = time.Now()
 				tx, err = conn.Begin(ctx)
 				if err != nil {
+					if ctx.Err() != nil || conn.IsClosed() {
+						return
+					}
 					errCount.Add(1)
 					errs.Record(err)
 					ops.Add(1)
@@ -118,6 +136,9 @@ func Transactions(ctx context.Context, cfg *Config) (*Result, error) {
 				mu.Unlock()
 				ops.Add(1)
 				if err != nil {
+					if ctx.Err() != nil || conn.IsClosed() {
+						return
+					}
 					errCount.Add(1)
 					errs.Record(err)
 				}

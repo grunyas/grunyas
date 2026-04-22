@@ -78,8 +78,16 @@ type PoolManagerInterface interface {
 
 // UpstreamClientInterface defines the interface for the upstream database client.
 type UpstreamClientInterface interface {
-	// Send sends the given messages to the database.
+	// Send buffers the given messages for delivery to the database. Call Flush to
+	// actually transmit them. Batching multiple Send calls before a Flush reduces
+	// the number of write syscalls per client request.
 	Send(...pgproto3.FrontendMessage) error
+
+	// Flush writes any pending buffered messages to the database connection.
+	// This is where the actual write syscall happens. Must be called at protocol
+	// boundaries (Sync, Query, Flush, CopyDone, CopyFail) so the backend can
+	// process the batched request.
+	Flush() error
 
 	// Receive reads a message from the upstream connection.
 	Receive(ctx context.Context) (pgproto3.BackendMessage, error)
@@ -120,14 +128,30 @@ type DownstreamClientInterface interface {
 	// For AuthScramSHA256, it returns (username, "", nil) — the SASL exchange happens separately.
 	Startup(authMethod AuthMethod) (string, string, error)
 
+	// MD5Salt returns the random salt sent to the client during MD5 authentication.
+	// Only valid after Startup returns with AuthMD5.
+	MD5Salt() [4]byte
+
+	// SASLExchange performs the full SASL/SCRAM-SHA-256 handshake with the client.
+	// stepFn is called for each step of the SCRAM conversation.
+	SASLExchange(stepFn func(string) (string, error)) error
+
 	// Handshake performs the post-authentication initialization (parameter status, etc).
 	Handshake() error
 
 	// Receive reads a message from the client.
 	Receive() (pgproto3.FrontendMessage, error)
 
-	// Send sends messages to the client.
+	// Send buffers messages for delivery to the client. Call Flush to actually
+	// transmit them. Batching multiple Send calls before a Flush reduces the
+	// number of write syscalls per query response.
 	Send(...pgproto3.BackendMessage) error
+
+	// Flush writes any pending buffered messages to the client connection.
+	// This is where the actual write syscall happens. Must be called at protocol
+	// boundaries (ReadyForQuery, ErrorResponse) so the client can process the
+	// batched response.
+	Flush() error
 
 	// Close closes the client connection.
 	Close() error

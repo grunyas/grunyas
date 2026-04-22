@@ -48,12 +48,6 @@ func TestCanAcceptNewSessionRespectsMax(t *testing.T) {
 	}
 }
 
-// TestHandleInitialMessageRejectsMissingUser needs to be refactored to use the new downstream_client startup flow.
-// For now we will skip it to allow other tests to run once we fix compilation.
-func TestHandleInitialMessageRejectsMissingUser(t *testing.T) {
-	t.Skip("Needs refactoring for new downstream_client Startup() flow")
-}
-
 func newTestServer(t *testing.T, mutate func(*config.Config)) *Proxy {
 	t.Helper()
 
