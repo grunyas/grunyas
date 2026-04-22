@@ -13,7 +13,7 @@ This file is a fast-start guide for working on this project with minimal back-an
 
 ## Requirements
 
-- Go: `go 1.25.5` (see `go.mod`).
+- Go: `go 1.26.2` (see `go.mod`).
 - PostgreSQL for integration + SQL tests.
 - Optional: Docker for `docker-compose.integration.yml`.
 

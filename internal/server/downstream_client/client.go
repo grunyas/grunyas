@@ -4,6 +4,7 @@ import (
 	"crypto/md5"
 	"crypto/rand"
 	"crypto/tls"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"net"
@@ -263,8 +264,14 @@ func (c *Client) Handshake() error {
 		return fmt.Errorf("failed to send parameter status: %w", err)
 	}
 
-	// Send BackendKeyData (dummy for now)
-	if err := c.Send(&pgproto3.BackendKeyData{ProcessID: 1234, SecretKey: 5678}); err != nil {
+	var keyBuf [8]byte
+	if _, err := rand.Read(keyBuf[:]); err != nil {
+		return fmt.Errorf("generate backend key data: %w", err)
+	}
+	if err := c.Send(&pgproto3.BackendKeyData{
+		ProcessID: binary.BigEndian.Uint32(keyBuf[0:4]),
+		SecretKey: keyBuf[4:8],
+	}); err != nil {
 		return fmt.Errorf("failed to send backend key data: %w", err)
 	}
 
