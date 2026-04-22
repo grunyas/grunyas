@@ -32,17 +32,19 @@ A PostgreSQL protocol-aware proxy server written in Go, designed to sit between 
   - Idle connection sweeper with configurable timeout
   - Maximum session limits with graceful rejection
 
+- **Session & Transaction Pooling**
+
+  - Session-mode (one upstream per client session) and transaction-mode (upstream leased per transaction) pooling
+  - Lazy upstream acquisition — connections are taken from the pool only on first query
+  - Extended query protocol support (Parse/Bind/Describe/Execute/Sync/Close/Flush) with per-message dispatch
+
 - **Architecture**
   - Clean separation of concerns with interface-based design
   - No circular dependencies (using dependency injection pattern)
   - Comprehensive test coverage for core components
   - Structured logging with zap
   - Optional OpenTelemetry integration
-
-### 🚧 In Progress
-
-- Lazy connection acquisition from pool (infrastructure ready)
-- Response streaming from backend to client
+  - Optional Go `pprof` HTTP endpoint for profiling
 
 ### 📋 Planned
 
@@ -88,31 +90,33 @@ A PostgreSQL protocol-aware proxy server written in Go, designed to sit between 
 .
 ├── cmd/
 │   └── main.go                    # Application entry point
-├── config/
-│   ├── config.go                  # Configuration management
+├── config/                        # Configuration (TOML + env var overrides)
+│   ├── config.go                  # Top-level config, defaults & validation
 │   ├── auth_config.go             # Authentication settings
-│   ├── database_config.go         # Backend connection settings
-│   ├── server_config.go           # Server settings
+│   ├── database_config.go         # Backend connection & pool settings
+│   ├── server_config.go           # Listener, SSL, pool mode, pprof
 │   ├── logging_config.go          # Logging configuration
 │   └── telemetry_config.go        # OpenTelemetry settings
 ├── internal/
-│   ├── auth/                      # Authentication implementations
-│   ├── console/                   # Interactive console
-│   ├── logger/                    # Logging and telemetry
+│   ├── auth/                      # Plain, MD5, and SCRAM-SHA-256 auth
+│   ├── console/                   # Interactive runtime console
+│   ├── logger/                    # Zap + OpenTelemetry integration
 │   ├── pool/                      # Upstream connection pooling
-│   │   ├── manager/
-│   │   └── upstream_client/
-│   └── server/                    # Core server logic
-│       ├── downstream_client/     # Client wire protocol handling
-│       ├── messaging/             # Protocol message dispatch & handling
-│       ├── proxy/                 # Main proxy listener & pool management
-│       ├── session/               # Client session lifecycle
-│       └── types/                 # Shared interfaces
+│   │   ├── manager/               # pgxpool-backed pool manager
+│   │   └── upstream_client/       # Session & transaction-mode clients
+│   ├── server/                    # Core server logic
+│   │   ├── downstream_client/     # Client wire protocol handling
+│   │   ├── messaging/             # Per-message dispatch (Parse, Bind, Execute, …)
+│   │   ├── proxy/                 # Main proxy listener & idle sweeper
+│   │   ├── session/               # Client session lifecycle
+│   │   └── types/                 # Shared interfaces
 │   ├── testutil/                  # Test helpers (goleak, etc.)
-│   └── utils/                     # Shared utilities
+│   └── utils/
 │       └── pgx_log_adapter/       # Zap adapter for pgx
 ├── scripts/
+│   ├── benchmark.sh               # pgbench comparison vs pgbouncer / pgcat
 │   └── run-sql-tests.sh           # Runs tests/sql against a running proxy
+├── simulators/                    # Multi-language client simulators (Go, Python, TypeScript, Java)
 ├── tests/
 │   ├── integration/               # pgproto3 integration tests
 │   └── sql/                       # End-to-end SQL test suite
@@ -136,6 +140,7 @@ pool_mode = "session"           # options: session, transaction
 ssl_mode = "optional"           # options: never, optional, mandatory
 ssl_cert = "server.crt"         # path to certificate file (required for optional/mandatory)
 ssl_key = "server.key"          # path to key file (required for optional/mandatory)
+# pprof_addr = "127.0.0.1:6060" # optional: enables Go pprof HTTP server
 
 [logging]
 level = "info"
@@ -169,15 +174,19 @@ pool_health_check_period = 60
 
 ## Build & Run
 
+Any key in `config.toml` can be overridden via environment variables using the
+`GRUNYAS_` prefix with `.` replaced by `_` (e.g. `GRUNYAS_SERVER_LISTEN_ADDR`,
+`GRUNYAS_BACKEND_HOST`).
+
 ```bash
 # Build
 go build -o grunyas ./cmd
 
-# Run with config file
+# Run (reads ./config.toml if present)
 ./grunyas
 
-# Or specify config path
-./grunyas -config /path/to/config.toml
+# Run without the interactive console
+./grunyas -no-console
 ```
 
 ## Testing
@@ -236,11 +245,27 @@ done
 
 **Current Test Coverage:**
 
-- ✅ Session management (5 tests)
-- ✅ Server initialization (4 tests)
+- ✅ Session lifecycle (startup, auth, query dispatch, shutdown)
+- ✅ Server initialization and proxy wiring
 - ✅ Idle connection sweeping
-- ✅ Authentication flow
-- ✅ Protocol message handling
+- ✅ Authentication flow (plain, MD5, SCRAM-SHA-256)
+- ✅ Protocol message handling (simple + extended query)
+- ✅ Upstream pool / session client behavior
+- ✅ Downstream client wire protocol
+- ✅ Config validation and defaults
+
+### Client Simulators
+
+The `simulators/` directory contains containerized client simulators in Go, Python, TypeScript, and Java. Each runs the same set of scenarios against grunyas in both session and transaction pool modes, to validate behavior across real database drivers.
+
+```bash
+cd simulators/go && ./run.sh
+cd simulators/python && ./run.sh
+cd simulators/typescript && ./run.sh
+cd simulators/java && ./run.sh
+```
+
+See [simulators/INSTRUCTIONS.md](simulators/INSTRUCTIONS.md) for details.
 
 ### Performance Benchmarking
 
@@ -269,13 +294,15 @@ Compare performance against pgbouncer and pgcat using `pgbench`:
 
 ### Key Design Decisions
 
-1. **Interface-Based Architecture**: The `types.ProxyServer` interface breaks circular dependencies between server and session packages, enabling clean separation and testability.
+1. **Interface-Based Architecture**: The interfaces in `internal/server/types` (e.g. `ProxyInterface`, `UpstreamClientInterface`, `DownstreamClientInterface`) break circular dependencies between packages and enable clean separation and testability.
 
-2. **Lazy Connection Acquisition**: Connections are acquired from the pool only when needed, reducing resource usage for idle sessions.
+2. **Lazy Connection Acquisition**: Upstream connections are acquired from the pool only on the first query, reducing resource usage for idle sessions.
 
-3. **Structured Logging**: All components use structured logging with context propagation for better observability.
+3. **Buffered Send / Flush**: Both the upstream and downstream clients batch `Send` calls and only issue a write syscall on explicit `Flush` at protocol boundaries (ReadyForQuery, Sync, etc.), reducing syscall overhead.
 
-4. **Graceful Degradation**: The server handles capacity limits gracefully, rejecting new connections with proper PostgreSQL error codes.
+4. **Structured Logging**: All components use structured logging with context propagation for better observability.
+
+5. **Graceful Degradation**: The server handles capacity limits gracefully, rejecting new connections with proper PostgreSQL error codes.
 
 ### Adding New Features
 

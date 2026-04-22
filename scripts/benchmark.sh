@@ -91,7 +91,7 @@ log_error() {
 cleanup() {
   if [[ "$KEEP_CONTAINERS" == "0" ]]; then
     log_info "Cleaning up containers..."
-    # docker compose -f "$COMPOSE_FILE" down -v --remove-orphans >/dev/null 2>&1 || true
+    docker compose -f "$COMPOSE_FILE" down -v --remove-orphans >/dev/null 2>&1 || true
   else
     log_info "Keeping containers running (--keep specified)"
   fi
@@ -180,7 +180,7 @@ print_summary() {
 echo ""
 echo "╔═══════════════════════════════════════════════════════════════════════════════╗"
 echo "║         PostgreSQL Connection Pooler Benchmark                                ║"
-echo "║         grunyas vs pgbouncer vs pgcat                                    ║"
+echo "║         grunyas vs pgbouncer vs pgcat                                         ║"
 echo "╚═══════════════════════════════════════════════════════════════════════════════╝"
 echo ""
 
@@ -215,9 +215,9 @@ fi
 declare -a RESULTS
 
 # Run benchmarks
-run_pgbench "grunyas" "127.0.0.1" 5711
 run_pgbench "pgbouncer" "127.0.0.1" 6432
 run_pgbench "pgcat" "127.0.0.1" 6433
+run_pgbench "grunyas" "127.0.0.1" 5711
 
 # Print summary
 print_summary

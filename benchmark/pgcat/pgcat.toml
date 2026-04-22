@@ -1,0 +1,24 @@
+# PgCat configuration for benchmarking
+# Session pooling mode to match grunyas behavior
+
+[general]
+host = "0.0.0.0"
+port = 6433
+admin_username = "admin"
+admin_password = "admin"
+connect_timeout = 5000
+idle_timeout = 30000
+shutdown_timeout = 60000
+
+[pools.postgres]
+pool_mode = "session"
+
+[pools.postgres.shards.0]
+servers = [["postgres", 5432, "primary"]]
+database = "postgres"
+
+[pools.postgres.users.0]
+username = "postgres"
+password = "postgres"
+pool_size = 100
+min_pool_size = 10
