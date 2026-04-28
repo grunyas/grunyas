@@ -64,18 +64,6 @@ type PoolStats struct {
 	MaxConns      int32
 }
 
-// PoolManagerInterface defines the interface for the database connection pool manager.
-type PoolManagerInterface interface {
-	// AcquireDbConnection obtains a connection from the database pool.
-	AcquireDbConnection() (UpstreamClientInterface, error)
-
-	// PoolStats returns the current statistics of the database connection pool.
-	PoolStats() PoolStats
-
-	// Close closes the connection pool.
-	Close()
-}
-
 // UpstreamClientInterface defines the interface for the upstream database client.
 type UpstreamClientInterface interface {
 	// Send buffers the given messages for delivery to the database. Call Flush to

@@ -16,55 +16,67 @@ import (
 	"go.uber.org/zap"
 )
 
-type PoolManager struct {
-	ctx context.Context
-
-	logger     *zap.Logger
-	pool       *pgxpool.Pool
-	discardAll bool // true only in session mode
+// Manager is the per-node connection pool interface.
+type Manager interface {
+	Acquire(ctx context.Context) (types.UpstreamClientInterface, error)
+	PoolStats() types.PoolStats
+	Close()
 }
 
-func Initialize(prx types.ProxyInterface) *PoolManager {
-	ctx := prx.GetContext()
-	cfg := prx.GetConfig().BackendConfig
-	logger := prx.GetLogger()
-	discardAll := prx.GetConfig().ServerConfig.PoolMode == config.PoolModeSession
+// NodeSpec holds the configuration needed to build a pool for one node.
+type NodeSpec struct {
+	ID         string
+	Host       string
+	Port       uint16
+	Connection config.NodeConnectionConfig
+	Pool       config.NodePoolConfig
+	// DiscardAll is true in session mode (connections need DISCARD ALL
+	// before returning to the pool). In M1 this is always true since
+	// only the write port (session mode) is wired.
+	DiscardAll bool
+}
 
-	// Initialize connection pool
-	poolConfig, err := pgxpool.ParseConfig(DatabaseDSN(cfg))
+// poolManager is the concrete per-node pool. It wraps a pgxpool.Pool.
+type poolManager struct {
+	ctx        context.Context
+	logger     *zap.Logger
+	pool       *pgxpool.Pool
+	discardAll bool
+}
+
+// New constructs a Manager for one node, with its connection and pool config.
+func New(ctx context.Context, spec NodeSpec, log *zap.Logger) (Manager, error) {
+	poolConfig, err := pgxpool.ParseConfig(NodeDSN(spec))
 	if err != nil {
-		panic(fmt.Errorf("failed to parse pool config: %w", err))
+		return nil, fmt.Errorf("failed to parse pool config: %w", err)
 	}
 
-	// Configure pool settings
-	poolConfig.MinConns = int32(cfg.PoolMinConns)
-	poolConfig.MaxConns = int32(cfg.PoolMaxConns)
-	poolConfig.MaxConnLifetime = time.Duration(cfg.PoolMaxConnLifetime) * time.Second
-	poolConfig.MaxConnIdleTime = time.Duration(cfg.PoolMaxConnIdleTime) * time.Second
-	poolConfig.HealthCheckPeriod = time.Duration(cfg.PoolHealthCheckPeriod) * time.Second
+	poolConfig.MinConns = int32(spec.Pool.MinConns)
+	poolConfig.MaxConns = int32(spec.Pool.MaxConns)
+	poolConfig.MaxConnLifetime = time.Duration(spec.Pool.MaxConnLifetime) * time.Second
+	poolConfig.MaxConnIdleTime = time.Duration(spec.Pool.MaxConnIdleTime) * time.Second
+	poolConfig.HealthCheckPeriod = time.Duration(spec.Pool.HealthCheckPeriod) * time.Second
 
-	// Configure logging for background connection events
 	poolConfig.ConnConfig.Tracer = &tracelog.TraceLog{
-		Logger:   pgx_log_adapter.Initialize(logger),
-		LogLevel: tracelog.LogLevelDebug, // Debug to see connection lifecycle events
+		Logger:   pgx_log_adapter.Initialize(log),
+		LogLevel: tracelog.LogLevelDebug,
 	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
-		panic(fmt.Errorf("failed to create connection pool: %w", err))
+		return nil, fmt.Errorf("failed to create connection pool: %w", err)
 	}
 
-	return &PoolManager{
+	return &poolManager{
 		ctx:        ctx,
-		logger:     logger,
+		logger:     log.With(zap.String("pool_node", spec.ID)),
 		pool:       pool,
-		discardAll: discardAll,
-	}
+		discardAll: spec.DiscardAll,
+	}, nil
 }
 
-// AcquireDbConnection acquires a connection from the database pool.
-func (pm *PoolManager) AcquireDbConnection() (types.UpstreamClientInterface, error) {
-	acquireCtx, cancel := context.WithTimeout(pm.ctx, 10*time.Second) // TODO: make this configurable
+func (pm *poolManager) Acquire(ctx context.Context) (types.UpstreamClientInterface, error) {
+	acquireCtx, cancel := context.WithTimeout(pm.ctx, 10*time.Second)
 	defer cancel()
 
 	sessionClient, err := pm.pool.Acquire(acquireCtx)
@@ -93,8 +105,7 @@ func (pm *PoolManager) AcquireDbConnection() (types.UpstreamClientInterface, err
 	return upstream_client.Initialize(sessionClient, pm.discardAll), nil
 }
 
-// PoolStats returns the current statistics of the database connection pool.
-func (pm *PoolManager) PoolStats() types.PoolStats {
+func (pm *poolManager) PoolStats() types.PoolStats {
 	s := pm.pool.Stat()
 	return types.PoolStats{
 		TotalConns:    s.TotalConns(),
@@ -104,31 +115,34 @@ func (pm *PoolManager) PoolStats() types.PoolStats {
 	}
 }
 
-func (pm *PoolManager) Close() {
+func (pm *poolManager) Close() {
 	pm.pool.Close()
 }
 
-func DatabaseDSN(cfg config.DatabasePoolConfig) string {
+// NodeDSN builds a postgres:// DSN from a NodeSpec. The spec's connection
+// fields supply the user, password, host, port, database, and connect_timeout.
+func NodeDSN(spec NodeSpec) string {
 	u := &url.URL{
 		Scheme: "postgres",
-		Host:   fmt.Sprintf("%s:%d", cfg.DatabaseHost, cfg.DatabasePort),
-		Path:   cfg.DatabaseName,
+		Host:   fmt.Sprintf("%s:%d", spec.Host, spec.Port),
+		Path:   spec.Connection.Database,
 	}
 
-	if cfg.DatabaseUser != "" {
-		if cfg.DatabasePassword != "" {
-			u.User = url.UserPassword(cfg.DatabaseUser, cfg.DatabasePassword)
+	if spec.Connection.User != "" {
+		if spec.Connection.Password != "" {
+			u.User = url.UserPassword(spec.Connection.User, spec.Connection.Password)
 		} else {
-			u.User = url.User(cfg.DatabaseUser)
+			u.User = url.User(spec.Connection.User)
 		}
 	}
 
 	q := u.Query()
-	if cfg.DatabaseConnectTimeoutSeconds > 0 {
-		q.Set("connect_timeout", strconv.Itoa(cfg.DatabaseConnectTimeoutSeconds))
+	if spec.Connection.ConnectTimeoutSeconds > 0 {
+		q.Set("connect_timeout", strconv.Itoa(spec.Connection.ConnectTimeoutSeconds))
 	}
-
 	u.RawQuery = q.Encode()
 
 	return u.String()
 }
+
+

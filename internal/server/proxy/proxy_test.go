@@ -13,17 +13,19 @@ import (
 	"github.com/grunyas/grunyas/internal/server/session"
 )
 
-func TestBackendDSN(t *testing.T) {
-	cfg := config.DatabasePoolConfig{
-		DatabaseHost:                  "db",
-		DatabasePort:                  5433,
-		DatabaseUser:                  "alice",
-		DatabasePassword:              "secret",
-		DatabaseName:                  "mydb",
-		DatabaseConnectTimeoutSeconds: 7,
+func TestNodeDSN(t *testing.T) {
+	spec := pool.NodeSpec{
+		Host: "db",
+		Port: 5433,
+		Connection: config.NodeConnectionConfig{
+			User:                  "alice",
+			Password:              "secret",
+			Database:              "mydb",
+			ConnectTimeoutSeconds: 7,
+		},
 	}
 
-	dsn := pool.DatabaseDSN(cfg)
+	dsn := pool.NodeDSN(spec)
 	want := "postgres://alice:secret@db:5433/mydb?connect_timeout=7"
 	if dsn != want {
 		t.Fatalf("unexpected dsn, got %q want %q", dsn, want)

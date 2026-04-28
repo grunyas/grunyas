@@ -13,11 +13,13 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/grunyas/grunyas/config"
 	"github.com/grunyas/grunyas/internal/console"
 	"github.com/grunyas/grunyas/internal/logger"
 	"github.com/grunyas/grunyas/internal/server/proxy"
+	"github.com/grunyas/grunyas/internal/topology"
 	"github.com/spf13/viper"
 	"go.uber.org/zap"
 )
@@ -57,7 +59,7 @@ func main() {
 
 	// Create a channel for logs only if using console
 	var logCh *logger.LoggerChannel
-	var logWriter io.Writer // Use io.Writer to properly pass nil
+	var logWriter io.Writer
 	if !*noConsole {
 		logCh = logger.NewLoggerChannel()
 		logWriter = logCh
@@ -70,8 +72,8 @@ func main() {
 	defer cleanup(context.Background()) //nolint:errcheck
 
 	if addr := cfg.ServerConfig.PprofAddr; addr != "" {
-		runtime.SetBlockProfileRate(1)     // record every block event
-		runtime.SetMutexProfileFraction(1) // record every mutex contention event
+		runtime.SetBlockProfileRate(1)
+		runtime.SetMutexProfileFraction(1)
 		go func() {
 			logger.Info("pprof server listening", zap.String("addr", addr))
 			if err := http.ListenAndServe(addr, nil); err != nil {
@@ -80,9 +82,87 @@ func main() {
 		}()
 	}
 
-	srv := proxy.Initialize(ctx, &cfg, logger)
+	// -----------------------------------------------------------------------
+	// M1 startup flow (§5 of architecture/M1.md)
+	// -----------------------------------------------------------------------
 
-	// Run server in background (since it blocks)
+	// 3. Build topology object
+	topo, err := topology.New(ctx, &cfg, logger)
+	if err != nil {
+		logger.Panic("failed to build topology", zap.Error(err))
+	}
+	defer topo.Close()
+
+	// 5. Wait for every node's first probe to complete
+	probeTimeout := time.Duration(cfg.ServerConfig.StartupProbeTimeoutSeconds) * time.Second
+	if probeTimeout <= 0 {
+		probeTimeout = 10 * time.Second
+	}
+	probeCtx, probeCancel := context.WithTimeout(ctx, probeTimeout)
+	topo.WaitForInitialProbes(probeCtx)
+	probeCancel()
+
+	// 6. Verify system_identifier consistency
+	// Single-node deployments skip this check.
+	if len(cfg.Nodes) > 1 {
+		if sysIDErr := topo.SystemIDError(); sysIDErr != nil {
+			logger.Panic("system_identifier mismatch detected during startup — aborting",
+				zap.Error(sysIDErr))
+		}
+	}
+
+	// All-nodes-down → abort (M1.md §5).
+	// A node is "not up" if it never completed a probe (LastProbeAt.IsZero())
+	// OR its last probe returned an error.
+	allDown := true
+	for _, nv := range topo.Nodes() {
+		if !nv.LastProbeAt.IsZero() && nv.LastProbeErr == nil {
+			allDown = false
+			break
+		}
+	}
+	if allDown {
+		logger.Panic("all nodes unreachable at startup — aborting")
+	}
+
+	// Log unreachable nodes (partial-cluster startup is allowed).
+	for _, nv := range topo.Nodes() {
+		if nv.LastProbeErr != nil {
+			logger.Warn("node unreachable at startup — starting as down",
+				zap.String("node", string(nv.ID)),
+				zap.Error(nv.LastProbeErr))
+		}
+	}
+
+	// 7. Warn about unimplemented ports
+	for portID := range cfg.ServerConfig.Ports {
+		if portID != "write" {
+			logger.Warn(fmt.Sprintf("port %q declared but not yet implemented in this version; ignored", portID))
+		}
+	}
+
+	// 9. Admin port: serves /healthz only (M1 stub).
+	if cfg.ServerConfig.AdminAddr != "" {
+		adminMux := http.NewServeMux()
+		adminMux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, `{"status":"ok"}`)
+		})
+		go func() {
+			logger.Info("admin listener starting", zap.String("addr", cfg.ServerConfig.AdminAddr))
+			if err := http.ListenAndServe(cfg.ServerConfig.AdminAddr, adminMux); err != nil {
+				logger.Warn("admin listener error", zap.Error(err))
+			}
+		}()
+	}
+
+	// -----------------------------------------------------------------------
+	// Serve
+	// -----------------------------------------------------------------------
+
+	srv := proxy.Initialize(ctx, &cfg, logger, topo)
+
 	go func() {
 		if err := srv.Run(); err != nil {
 			logger.Panic("server error", zap.Error(err))
@@ -94,12 +174,10 @@ func main() {
 		return
 	}
 
-	// Start interactive console in main thread (blocks until quit)
 	console.Start(ctx, srv, logCh.Channel)
 }
 
 func bindEnvKeys() {
-	// Bind server config (non-port fields)
 	serverKeys := []string{
 		"server.admin_addr",
 		"server.max_sessions",
@@ -111,7 +189,6 @@ func bindEnvKeys() {
 		"server.pprof_addr",
 	}
 
-	// Bind write port config
 	portKeys := []string{
 		"server.ports.write.listen_addr",
 		"server.ports.write.pool_mode",
@@ -120,7 +197,6 @@ func bindEnvKeys() {
 		"server.ports.write.ssl_key",
 	}
 
-	// Bind probe config
 	probeKeys := []string{
 		"probe.interval_ms",
 		"probe.liveness_failure_count",
@@ -128,7 +204,6 @@ func bindEnvKeys() {
 		"probe.role_max_age_ms",
 	}
 
-	// Bind logging, telemetry, auth
 	otherKeys := []string{
 		"logging.level",
 		"logging.development",
@@ -147,20 +222,13 @@ func bindEnvKeys() {
 		}
 	}
 
-	// Bind indexed node configs. Env-var override is capped at envNodeMax
-	// nodes (i.e. GRUNYAS_NODES_0_* through GRUNYAS_NODES_{envNodeMax-1}_*).
-	// Nodes declared beyond this cap in TOML still load; only env override
-	// stops working past the cap. Documented in config.toml.example.
 	for i := 0; i < envNodeMax; i++ {
 		bindNodeEnvVars(i)
 	}
 }
 
-// envNodeMax caps how many node indices accept env-var overrides.
-// Nodes declared in TOML are unaffected.
 const envNodeMax = 10
 
-// bindNodeEnvVars binds environment variables for a single node at the given index.
 func bindNodeEnvVars(index int) {
 	prefix := fmt.Sprintf("nodes.%d", index)
 
