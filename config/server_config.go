@@ -1,8 +1,8 @@
 package config
 
+// ServerConfig holds server-wide settings and port definitions.
 type ServerConfig struct {
-	ListenAddr string `mapstructure:"listen_addr"` // Formatted as host:port
-	AdminAddr  string `mapstructure:"admin_addr"`  // Formatted as host:port
+	AdminAddr string `mapstructure:"admin_addr"` // Formatted as host:port
 
 	// MaxSessions is the maximum number of concurrent client sessions allowed.
 	// If zero, there is no limit.
@@ -27,28 +27,70 @@ type ServerConfig struct {
 	// If zero, a default value of 9 is used.
 	KeepAliveCount int `mapstructure:"keep_alive_count"`
 
-	// SSLConfig holds the configuration for SSL/TLS connections.
-	SSLCert string `mapstructure:"ssl_cert"` // Path to the certificate file
-	SSLKey  string `mapstructure:"ssl_key"`  // Path to the key file
+	// StartupProbeTimeoutSeconds is the maximum time (in seconds) to wait for the first
+	// probe cycle on all nodes during startup. If zero, defaults to 10 seconds.
+	StartupProbeTimeoutSeconds int `mapstructure:"startup_probe_timeout_seconds"`
 
-	// SSLMode determines the enforcement of SSL connections.
-	// Supported values: "never", "optional", "mandatory".
-	// Default: "never".
-	SSLMode string `mapstructure:"ssl_mode"`
-
-	// PoolMode controls how upstream connections are leased.
-	// Supported values: "session", "transaction".
-	// Default: "session".
-	PoolMode PoolMode `mapstructure:"pool_mode"`
+	// Ports holds configuration for each listen port (write, read, compat).
+	Ports map[string]PortConfig `mapstructure:"ports"` // Keys: "write", "read", "compat"
 
 	// PprofAddr enables the Go pprof HTTP server on the given address.
 	// Example: "0.0.0.0:6060". If empty (default), pprof is disabled.
 	PprofAddr string `mapstructure:"pprof_addr"`
+
+	// --- Derived legacy fields (M1 shim) -----------------------------------
+	// These mirror the write-port settings so existing call sites that have
+	// not yet been migrated to per-port lookups keep compiling. Populated by
+	// Config.Normalize() after Unmarshal. Not read from TOML/env directly.
+	// Removed in M1 PR 2 once call sites use Topology + per-port routing.
+	ListenAddr string   `mapstructure:"-"`
+	PoolMode   PoolMode `mapstructure:"-"`
+	SSLMode    string   `mapstructure:"-"`
+	SSLCert    string   `mapstructure:"-"`
+	SSLKey     string   `mapstructure:"-"`
 }
 
+// GetWritePort returns the write port configuration.
+// Returns an empty PortConfig and false if the write port is not configured.
+func (s ServerConfig) GetWritePort() (PortConfig, bool) {
+	if s.Ports == nil {
+		return PortConfig{}, false
+	}
+	port, ok := s.Ports["write"]
+	return port, ok
+}
+
+// GetWritePoolMode returns the pool mode for the write port.
+// Defaults to "session" if not configured or invalid.
+func (s ServerConfig) GetWritePoolMode() PoolMode {
+	if port, ok := s.GetWritePort(); ok {
+		if m, ok := PoolModeFromString(port.PoolMode); ok {
+			return m
+		}
+	}
+	return PoolModeSession // default
+}
+
+// PoolMode represents the connection pooling mode.
 type PoolMode string
 
 const (
 	PoolModeSession     PoolMode = "session"
 	PoolModeTransaction PoolMode = "transaction"
 )
+
+// PoolModeFromString parses a string into a PoolMode.
+// Returns ("", false) for unknown values so the validator can detect them.
+// Empty string is treated as a known value (session default).
+func PoolModeFromString(s string) (PoolMode, bool) {
+	switch s {
+	case "":
+		return PoolModeSession, true // default
+	case "session":
+		return PoolModeSession, true
+	case "transaction":
+		return PoolModeTransaction, true
+	default:
+		return "", false
+	}
+}

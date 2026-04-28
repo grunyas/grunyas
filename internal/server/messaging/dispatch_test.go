@@ -35,17 +35,18 @@ func TestProcessExtendedProtocolPinning(t *testing.T) {
 		msg      pgproto3.FrontendMessage
 		wantPin  bool
 	}{
-		// Parse: only named statements pin
+		// Extended-protocol Parse/Bind/Describe never pin: they are NOT SQL PREPARE
+		// and pgx auto-names statements (stmtcache_<hash>), so name-based pinning
+		// permanently pins every connection. Persistent prepared statements arrive
+		// as a simple Query "PREPARE ..." and are handled below.
 		{"parse unnamed", &pgproto3.Parse{Name: "", Query: "SELECT 1"}, false},
-		{"parse named", &pgproto3.Parse{Name: "stmt1", Query: "SELECT 1"}, true},
+		{"parse named", &pgproto3.Parse{Name: "stmt1", Query: "SELECT 1"}, false},
 
-		// Bind: only named prepared statements pin
 		{"bind unnamed prepared", &pgproto3.Bind{PreparedStatement: ""}, false},
-		{"bind named prepared", &pgproto3.Bind{PreparedStatement: "stmt1"}, true},
+		{"bind named prepared", &pgproto3.Bind{PreparedStatement: "stmt1"}, false},
 
-		// Describe: only named statements pin (not portals)
 		{"describe unnamed statement", &pgproto3.Describe{ObjectType: 'S', Name: ""}, false},
-		{"describe named statement", &pgproto3.Describe{ObjectType: 'S', Name: "stmt1"}, true},
+		{"describe named statement", &pgproto3.Describe{ObjectType: 'S', Name: "stmt1"}, false},
 		{"describe portal", &pgproto3.Describe{ObjectType: 'P', Name: "portal1"}, false},
 
 		// Execute: never pins
