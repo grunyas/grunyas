@@ -1,27 +1,62 @@
 [server]
-listen_addr = "0.0.0.0:5711"
 admin_addr = "0.0.0.0:5712"
-
 max_sessions = 1000
-
 client_idle_timeout = 300
-
 keep_alive_timeout = 15
 keep_alive_interval = 15
 keep_alive_count = 9
+startup_probe_timeout_seconds = 10
 
+[server.ports.write]
+listen_addr = "0.0.0.0:5711"
 pool_mode = "session" # options: session, transaction
-
 ssl_mode = "mandatory"
 ssl_cert = "server.crt"
 ssl_key = "server.key"
+
+# Read and compat ports are forward-compatible with M3 routing but
+# are NOT bound in M1. Leave commented out until M3 ships.
+# [server.ports.read]
+# listen_addr = "0.0.0.0:5713"
+# pool_mode = "transaction"
+# ssl_mode = "never"
+#
+# [server.ports.compat]
+# listen_addr = "0.0.0.0:5714"
+# pool_mode = "transaction"
+# ssl_mode = "never"
+
+[[nodes]]
+id = "primary-1"
+host = "127.0.0.1"
+port = 5432
+declared_role = "primary"
+
+[nodes.connection]
+user = "postgres"
+password = ""
+database = "postgres"
+connect_timeout_seconds = 5
+ssl_mode = "disable" # only "disable" supported in M1 (reserved for future use)
+
+[nodes.pool]
+min_conns = 2
+max_conns = 10
+max_conn_lifetime = 3600
+max_conn_idle_time = 1800
+health_check_period = 60
+
+[probe]
+interval_ms = 1000
+liveness_failure_count = 3
+liveness_max_age_ms = 5000
+role_max_age_ms = 5000
 
 [logging]
 level = "info"
 development = true
 
 [telemetry]
-# Leave empty to disable OTLP.
 otlp_endpoint = ""
 insecure = true
 service_name = "grunyas"
@@ -31,16 +66,10 @@ method = "md5" # options: plain, md5, scram-sha-256
 username = "postgres"
 password = "postgres" # plain, md5 hash, or SCRAM stored secret
 
-[backend]
-host = "127.0.0.1"
-port = 5432
-user = "postgres"
-password = ""
-database = "postgres"
-connect_timeout_seconds = 5
-
-pool_min_conns = 2              # Minimum connections to keep warm
-pool_max_conns = 10             # Maximum connections in pool
-pool_max_conn_lifetime = 3600   # Max connection lifetime (1 hour)
-pool_max_conn_idle_time = 1800  # Max idle time before closing (30 minutes)
-pool_health_check_period = 60   # Health check interval (1 minute)
+# Environment variable overrides:
+#   Any key above can be overridden via GRUNYAS_<KEY> (dots become underscores).
+#   Example: GRUNYAS_SERVER_PORTS_WRITE_LISTEN_ADDR=0.0.0.0:6000
+#
+# Indexed node fields (e.g. GRUNYAS_NODES_0_HOST, GRUNYAS_NODES_1_PORT) are
+# accepted for indices 0..9 only. Nodes declared in TOML at index >= 10 still
+# load fine; only env-var override stops working past that cap.
