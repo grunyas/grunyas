@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/grunyas/grunyas/config"
 	"github.com/grunyas/grunyas/internal/server/proxy"
+	"github.com/grunyas/grunyas/internal/topology"
 	"go.uber.org/zap"
 )
 
@@ -120,17 +121,28 @@ func startProxy(t *testing.T, env testEnv) (addr string, stop func()) {
 	cfg.Auth.Username = env.user
 	cfg.Auth.Password = env.password
 
-	cfg.BackendConfig.DatabaseHost = env.host
-	cfg.BackendConfig.DatabasePort = env.port
-	cfg.BackendConfig.DatabaseUser = env.user
-	cfg.BackendConfig.DatabasePassword = env.password
-	cfg.BackendConfig.DatabaseName = env.database
-	cfg.BackendConfig.PoolMinConns = 1
-	cfg.BackendConfig.PoolMaxConns = 4
-	cfg.BackendConfig.DatabaseConnectTimeoutSeconds = 5
+	// Update the primary node entry to point at the test Postgres instance.
+	if len(cfg.Nodes) > 0 {
+		cfg.Nodes[0].Host = env.host
+		cfg.Nodes[0].Port = env.port
+		cfg.Nodes[0].Connection.User = env.user
+		cfg.Nodes[0].Connection.Password = env.password
+		cfg.Nodes[0].Connection.Database = env.database
+		cfg.Nodes[0].Connection.ConnectTimeoutSeconds = 5
+		cfg.Nodes[0].Pool.MinConns = 1
+		cfg.Nodes[0].Pool.MaxConns = 4
+	}
+	// Re-normalize so the legacy BackendConfig shim reflects the updated nodes.
+	cfg.Normalize()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	prx := proxy.Initialize(ctx, &cfg, zap.NewNop())
+
+	topo, err := topology.New(ctx, &cfg, zap.NewNop())
+	if err != nil {
+		t.Fatalf("failed to create topology: %v", err)
+	}
+
+	prx := proxy.Initialize(ctx, &cfg, zap.NewNop(), topo)
 
 	errCh := make(chan error, 1)
 	go func() {
