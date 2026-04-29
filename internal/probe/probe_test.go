@@ -24,11 +24,11 @@ func (f *fakeSink) UpdateLiveness(id string, liveness Liveness, err error) {
 	f.callCount++
 }
 
-func (f *fakeSink) UpdateObservedRole(id string, role Role) {}
-func (f *fakeSink) UpdateSystemID(id string, sid string) error { return nil }
+func (f *fakeSink) UpdateObservedRole(id string, role Role)               {}
+func (f *fakeSink) UpdateSystemID(id string, sid string) error            { return nil }
 func (f *fakeSink) UpdateLag(id string, lagMs int64, sampledAt time.Time) {}
-func (f *fakeSink) MarkLagIdle(id string, sampledAt time.Time) {}
-func (f *fakeSink) MarkLagUnknown(id string, reason error) {}
+func (f *fakeSink) MarkLagIdle(id string, sampledAt time.Time)            {}
+func (f *fakeSink) MarkLagUnknown(id string, reason error)                {}
 
 // errorSink returns a configured error from UpdateSystemID.
 type errorSink struct {

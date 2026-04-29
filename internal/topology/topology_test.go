@@ -16,10 +16,10 @@ func newTestTopology(t *testing.T, nodes map[NodeID]*nodeState, livenessMaxAgeMs
 		nodes = make(map[NodeID]*nodeState)
 	}
 	return &Topology{
-		nodes:              nodes,
-		logger:             zap.NewNop(),
-		livenessMaxAgeMs:   livenessMaxAgeMs,
-		observedRoleMaxAgeMs: 5000,
+		nodes:                  nodes,
+		logger:                 zap.NewNop(),
+		livenessMaxAgeMs:       livenessMaxAgeMs,
+		observedRoleMaxAgeMs:   5000,
 		replicationLagMaxAgeMs: 2000,
 	}
 }

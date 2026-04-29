@@ -61,13 +61,13 @@ func Default() Config {
 func defaultConfig() Config {
 	return Config{
 		ServerConfig: ServerConfig{
-			Admin:                    DefaultAdminConfig(),
-			AdminAddr:                "127.0.0.1:5712",
-			MaxSessions:              1000,
-			ClientIdleTimeout:        300,
-			KeepAliveTimeout:         15,
-			KeepAliveInterval:        15,
-			KeepAliveCount:           9,
+			Admin:                      DefaultAdminConfig(),
+			AdminAddr:                  "127.0.0.1:5712",
+			MaxSessions:                1000,
+			ClientIdleTimeout:          300,
+			KeepAliveTimeout:           15,
+			KeepAliveInterval:          15,
+			KeepAliveCount:             9,
 			StartupProbeTimeoutSeconds: 10,
 			Ports: map[string]PortConfig{
 				"write": {

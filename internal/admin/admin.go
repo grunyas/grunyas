@@ -29,11 +29,11 @@ type Server struct {
 	cfg    *config.Config
 	logger *zap.Logger
 
-	httpSrv      *http.Server
-	tlsConfig    *tls.Config
-	tokenHashes  map[string]string
-	metricsReg   *prometheus.Registry
-	metricsSrv   *http.Server
+	httpSrv     *http.Server
+	tlsConfig   *tls.Config
+	tokenHashes map[string]string
+	metricsReg  *prometheus.Registry
+	metricsSrv  *http.Server
 
 	requestsTotal *prometheus.CounterVec
 	requestDur    *prometheus.HistogramVec
@@ -415,19 +415,19 @@ func (s *Server) poolViews() []map[string]interface{} {
 func (s *Server) nodeViewToJSON(nv topology.NodeView) map[string]interface{} {
 	clusterID := s.topo.ClusterID()
 	j := map[string]interface{}{
-		"id":                        string(nv.ID),
-		"host":                      nv.Host,
-		"port":                      nv.Port,
-		"declared_role":             nv.DeclaredRole.String(),
-		"observed_role":             nv.ObservedRole.String(),
-		"role_disagreement":         nv.ObservedRole != topology.RoleUnknown && nv.ObservedRole != nv.DeclaredRole,
-		"liveness":                  nv.Liveness.String(),
-		"liveness_state":            livenessState(nv),
-		"system_identifier":         string(nv.SystemID),
-		"system_identifier_match":   nv.SystemID != "" && nv.SystemID == clusterID,
-		"replication_lag_state":     nv.ReplicationLagState.String(),
-		"last_probe_at":             nv.LastProbeAt.UTC().Format(time.RFC3339Nano),
-		"last_lag_sample_at":        nv.LastLagSampleAt.UTC().Format(time.RFC3339Nano),
+		"id":                      string(nv.ID),
+		"host":                    nv.Host,
+		"port":                    nv.Port,
+		"declared_role":           nv.DeclaredRole.String(),
+		"observed_role":           nv.ObservedRole.String(),
+		"role_disagreement":       nv.ObservedRole != topology.RoleUnknown && nv.ObservedRole != nv.DeclaredRole,
+		"liveness":                nv.Liveness.String(),
+		"liveness_state":          livenessState(nv),
+		"system_identifier":       string(nv.SystemID),
+		"system_identifier_match": nv.SystemID != "" && nv.SystemID == clusterID,
+		"replication_lag_state":   nv.ReplicationLagState.String(),
+		"last_probe_at":           nv.LastProbeAt.UTC().Format(time.RFC3339Nano),
+		"last_lag_sample_at":      nv.LastLagSampleAt.UTC().Format(time.RFC3339Nano),
 	}
 	if nv.ReplicationLagMs != nil {
 		j["replication_lag_ms"] = *nv.ReplicationLagMs
@@ -506,15 +506,15 @@ func newTopologyCollector(topo *topology.Topology) *topologyCollector {
 }
 
 var (
-	buildInfoDesc     = prometheus.NewDesc("grunyas_build_info", "Build info", []string{"version", "commit", "go_version"}, nil)
-	nodesTotalDesc    = prometheus.NewDesc("grunyas_nodes_total", "Total nodes", nil, nil)
-	nodesByRoleDesc   = prometheus.NewDesc("grunyas_nodes_by_role", "Nodes by role", []string{"role"}, nil)
-	nodesByLiveDesc   = prometheus.NewDesc("grunyas_nodes_by_liveness", "Nodes by liveness", []string{"liveness"}, nil)
-	nodeLiveDesc      = prometheus.NewDesc("grunyas_node_liveness", "Node liveness", []string{"node_id"}, nil)
-	nodeRoleDesc      = prometheus.NewDesc("grunyas_node_observed_role", "Node observed role", []string{"node_id", "role"}, nil)
-	nodeDisagDesc     = prometheus.NewDesc("grunyas_node_role_disagreement", "Node role disagreement", []string{"node_id"}, nil)
-	nodeLagDesc       = prometheus.NewDesc("grunyas_node_replication_lag_ms", "Node replication lag ms", []string{"node_id"}, nil)
-	nodeObsAgeDesc    = prometheus.NewDesc("grunyas_node_observation_age_seconds", "Observation age", []string{"node_id", "property"}, nil)
+	buildInfoDesc   = prometheus.NewDesc("grunyas_build_info", "Build info", []string{"version", "commit", "go_version"}, nil)
+	nodesTotalDesc  = prometheus.NewDesc("grunyas_nodes_total", "Total nodes", nil, nil)
+	nodesByRoleDesc = prometheus.NewDesc("grunyas_nodes_by_role", "Nodes by role", []string{"role"}, nil)
+	nodesByLiveDesc = prometheus.NewDesc("grunyas_nodes_by_liveness", "Nodes by liveness", []string{"liveness"}, nil)
+	nodeLiveDesc    = prometheus.NewDesc("grunyas_node_liveness", "Node liveness", []string{"node_id"}, nil)
+	nodeRoleDesc    = prometheus.NewDesc("grunyas_node_observed_role", "Node observed role", []string{"node_id", "role"}, nil)
+	nodeDisagDesc   = prometheus.NewDesc("grunyas_node_role_disagreement", "Node role disagreement", []string{"node_id"}, nil)
+	nodeLagDesc     = prometheus.NewDesc("grunyas_node_replication_lag_ms", "Node replication lag ms", []string{"node_id"}, nil)
+	nodeObsAgeDesc  = prometheus.NewDesc("grunyas_node_observation_age_seconds", "Observation age", []string{"node_id", "property"}, nil)
 )
 
 func (c *topologyCollector) Describe(ch chan<- *prometheus.Desc) {

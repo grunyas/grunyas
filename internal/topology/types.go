@@ -30,7 +30,7 @@ func (r Role) String() string {
 type Liveness int
 
 const (
-	LivenessUp       Liveness = iota
+	LivenessUp Liveness = iota
 	LivenessDegraded
 	LivenessDown
 	LivenessUnknown
@@ -54,7 +54,7 @@ type SystemID string
 type LagState int
 
 const (
-	LagStateFresh        LagState = iota
+	LagStateFresh LagState = iota
 	LagStateIdle
 	LagStateStale
 	LagStateUnknown

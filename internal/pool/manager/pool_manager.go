@@ -7,12 +7,12 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/jackc/pgx/v5/tracelog"
 	"github.com/grunyas/grunyas/config"
 	"github.com/grunyas/grunyas/internal/pool/upstream_client"
 	"github.com/grunyas/grunyas/internal/server/types"
 	"github.com/grunyas/grunyas/internal/utils/pgx_log_adapter"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/tracelog"
 	"go.uber.org/zap"
 )
 

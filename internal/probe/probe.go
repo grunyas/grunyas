@@ -22,7 +22,7 @@ import (
 type Liveness int
 
 const (
-	LivenessUp       Liveness = iota
+	LivenessUp Liveness = iota
 	LivenessDegraded
 	LivenessDown
 	LivenessUnknown
@@ -57,10 +57,10 @@ type NodeSpec struct {
 }
 
 type ProbeConfig struct {
-	IntervalMs            int
-	LivenessFailureCount  int
-	LivenessMaxAgeMs      int
-	RoleMaxAgeMs          int
+	IntervalMs           int
+	LivenessFailureCount int
+	LivenessMaxAgeMs     int
+	RoleMaxAgeMs         int
 }
 
 type Probe struct {

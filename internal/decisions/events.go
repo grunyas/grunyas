@@ -14,12 +14,12 @@ const SchemaVersion = "1"
 
 // Event is a structured record of a single routing decision.
 type Event struct {
-	SchemaVersion string         `json:"schema_version"`
-	EventID       string         `json:"event_id"`       // ULID
-	Timestamp     time.Time      `json:"timestamp"`      // RFC3339Nano, UTC
-	Port          string         `json:"port"`           // "write" | "read" | "compat"
-	PoolMode      string         `json:"pool_mode"`      // "session" | "transaction"
-	LeaseType     string         `json:"lease_type"`     // "session" | "transaction" | "fallback"
+	SchemaVersion  string         `json:"schema_version"`
+	EventID        string         `json:"event_id"`   // ULID
+	Timestamp      time.Time      `json:"timestamp"`  // RFC3339Nano, UTC
+	Port           string         `json:"port"`       // "write" | "read" | "compat"
+	PoolMode       string         `json:"pool_mode"`  // "session" | "transaction"
+	LeaseType      string         `json:"lease_type"` // "session" | "transaction" | "fallback"
 	Classification Classification `json:"classification"`
 	Candidates     []Candidate    `json:"candidates"`
 	Outcome        Outcome        `json:"outcome"`
@@ -30,9 +30,9 @@ type Event struct {
 
 // Classification describes how the statement was classified.
 type Classification struct {
-	Type   string `json:"type"`             // "read" | "write" | "unknown"
-	Source string `json:"source"`           // "port" | "transaction_state" | "keyword" | "default"
-	SQL    string `json:"sql,omitempty"`    // truncated to 256 chars
+	Type   string `json:"type"`          // "read" | "write" | "unknown"
+	Source string `json:"source"`        // "port" | "transaction_state" | "keyword" | "default"
+	SQL    string `json:"sql,omitempty"` // truncated to 256 chars
 }
 
 // Candidate is a single node considered for routing.
@@ -52,7 +52,7 @@ type Outcome struct {
 
 // Consistency describes the consistency guarantee applied.
 type Consistency struct {
-	Mode              string `json:"mode"`                         // "linearizable" | "bounded_staleness" | "post_write_window"
+	Mode              string `json:"mode"` // "linearizable" | "bounded_staleness" | "post_write_window"
 	LagThresholdMs    *int   `json:"lag_threshold_ms,omitempty"`
 	WindowRemainingMs *int   `json:"window_remaining_ms,omitempty"`
 }

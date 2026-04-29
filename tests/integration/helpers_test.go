@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/grunyas/grunyas/config"
 	"github.com/grunyas/grunyas/internal/server/proxy"
 	"github.com/grunyas/grunyas/internal/topology"
+	"github.com/jackc/pgx/v5/pgproto3"
 	"go.uber.org/zap"
 )
 

@@ -44,5 +44,3 @@ type AdminTokenConfig struct {
 type AdminTokenEntry struct {
 	Role string `mapstructure:"role" json:"role"`
 }
-
-

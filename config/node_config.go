@@ -25,5 +25,3 @@ type NodePoolConfig struct {
 	MaxConnIdleTime   int `mapstructure:"max_conn_idle_time" json:"max_conn_idle_time"`
 	HealthCheckPeriod int `mapstructure:"health_check_period" json:"health_check_period"`
 }
-
-

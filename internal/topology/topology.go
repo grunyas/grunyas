@@ -15,14 +15,14 @@ import (
 type nodeState struct {
 	config config.NodeConfig
 
-	mu           sync.RWMutex
-	pool         pool.Manager
-	probe        *probe.Probe
-	observedRole Role
-	liveness     Liveness
-	systemID     SystemID
-	lastProbeAt  time.Time
-	lastProbeErr error
+	mu              sync.RWMutex
+	pool            pool.Manager
+	probe           *probe.Probe
+	observedRole    Role
+	liveness        Liveness
+	systemID        SystemID
+	lastProbeAt     time.Time
+	lastProbeErr    error
 	permanentlyDown bool
 
 	// M2: replication lag
@@ -38,7 +38,7 @@ type Topology struct {
 	clusterID SystemID
 	logger    *zap.Logger
 
-	sysIDMu sync.Mutex
+	sysIDMu  sync.Mutex
 	sysIDErr error
 
 	// Max-age configuration (derived from probe config at construction)
@@ -59,10 +59,10 @@ func NewEmpty() *Topology {
 
 func New(ctx context.Context, cfg *config.Config, log *zap.Logger) (*Topology, error) {
 	t := &Topology{
-		nodes:                 make(map[NodeID]*nodeState),
-		logger:                log,
-		livenessMaxAgeMs:      maxAgeOrDefault(cfg.ProbeConfig.LivenessMaxAgeMs, cfg.ProbeConfig.IntervalMs*2),
-		observedRoleMaxAgeMs:  maxAgeOrDefault(cfg.ProbeConfig.RoleMaxAgeMs, cfg.ProbeConfig.IntervalMs*5),
+		nodes:                  make(map[NodeID]*nodeState),
+		logger:                 log,
+		livenessMaxAgeMs:       maxAgeOrDefault(cfg.ProbeConfig.LivenessMaxAgeMs, cfg.ProbeConfig.IntervalMs*2),
+		observedRoleMaxAgeMs:   maxAgeOrDefault(cfg.ProbeConfig.RoleMaxAgeMs, cfg.ProbeConfig.IntervalMs*5),
 		replicationLagMaxAgeMs: maxAgeOrDefault(cfg.ProbeConfig.LagMaxAgeMs, cfg.ProbeConfig.IntervalMs*2),
 	}
 
@@ -467,9 +467,9 @@ func (t *Topology) nodeView(id NodeID, ns *nodeState) NodeView {
 		LastProbeAt:  ns.lastProbeAt,
 		LastProbeErr: ns.lastProbeErr,
 
-		ReplicationLagMs:      lagMs,
-		ReplicationLagState:   lagState,
-		LastLagSampleAt:       ns.lastLagSampleAt,
+		ReplicationLagMs:    lagMs,
+		ReplicationLagState: lagState,
+		LastLagSampleAt:     ns.lastLagSampleAt,
 
 		LivenessMaxAgeMs:       t.livenessMaxAgeMs,
 		ObservedRoleMaxAgeMs:   t.observedRoleMaxAgeMs,
@@ -526,9 +526,9 @@ func maxAgeOrDefault(val, fallback int) int {
 
 func probeConfig(cfg config.ProbeConfig) probe.ProbeConfig {
 	return probe.ProbeConfig{
-		IntervalMs:            cfg.IntervalMs,
-		LivenessFailureCount:  cfg.LivenessFailureCount,
-		LivenessMaxAgeMs:      cfg.LivenessMaxAgeMs,
-		RoleMaxAgeMs:          cfg.RoleMaxAgeMs,
+		IntervalMs:           cfg.IntervalMs,
+		LivenessFailureCount: cfg.LivenessFailureCount,
+		LivenessMaxAgeMs:     cfg.LivenessMaxAgeMs,
+		RoleMaxAgeMs:         cfg.RoleMaxAgeMs,
 	}
 }

@@ -238,8 +238,6 @@ func TestAllPrometheusMetricNamesRegistered(t *testing.T) {
 	}
 }
 
-
-
 // ---------------------------------------------------------------------------
 // /config redaction
 // ---------------------------------------------------------------------------
@@ -253,9 +251,9 @@ func TestConfigPasswordRedacted(t *testing.T) {
 			Port:         5432,
 			DeclaredRole: "primary",
 			Connection: config.NodeConnectionConfig{
-				User:     "admin",
-				Password: "super-secret",
-				Database: "mydb",
+				User:                  "admin",
+				Password:              "super-secret",
+				Database:              "mydb",
 				ConnectTimeoutSeconds: 5,
 			},
 			Pool: config.NodePoolConfig{MinConns: 1, MaxConns: 4},
@@ -367,17 +365,17 @@ func TestRequestMetricsUsesRoutePattern(t *testing.T) {
 
 func TestNodeViewToJSONKeyPresence(t *testing.T) {
 	nv := topology.NodeView{
-		ID:           "test-node",
-		Host:         "localhost",
-		Port:         5432,
-		DeclaredRole: topology.RolePrimary,
-		ObservedRole: topology.RolePrimary,
-		Liveness:     topology.LivenessUp,
-		SystemID:     "CLUSTER001",
-		LastProbeAt:  time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC),
-		ReplicationLagState:   topology.LagStateNotApplicable,
-		LivenessMaxAgeMs:      5000,
-		ObservedRoleMaxAgeMs:  5000,
+		ID:                     "test-node",
+		Host:                   "localhost",
+		Port:                   5432,
+		DeclaredRole:           topology.RolePrimary,
+		ObservedRole:           topology.RolePrimary,
+		Liveness:               topology.LivenessUp,
+		SystemID:               "CLUSTER001",
+		LastProbeAt:            time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC),
+		ReplicationLagState:    topology.LagStateNotApplicable,
+		LivenessMaxAgeMs:       5000,
+		ObservedRoleMaxAgeMs:   5000,
 		ReplicationLagMaxAgeMs: 2000,
 	}
 
@@ -425,7 +423,7 @@ func TestLivenessStateUnknown(t *testing.T) {
 
 func TestLivenessStateFresh(t *testing.T) {
 	nv := topology.NodeView{
-		LastProbeAt:     time.Now(),
+		LastProbeAt:      time.Now(),
 		LivenessMaxAgeMs: 5000,
 	}
 	if got := livenessState(nv); got != "fresh" {
@@ -435,7 +433,7 @@ func TestLivenessStateFresh(t *testing.T) {
 
 func TestLivenessStateStale(t *testing.T) {
 	nv := topology.NodeView{
-		LastProbeAt:     time.Now().Add(-10 * time.Second),
+		LastProbeAt:      time.Now().Add(-10 * time.Second),
 		LivenessMaxAgeMs: 1000, // 1s — well past
 	}
 	if got := livenessState(nv); got != "stale" {
