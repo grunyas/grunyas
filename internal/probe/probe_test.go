@@ -42,10 +42,10 @@ func (e *errorSink) UpdateSystemID(id string, sid string) error {
 	return e.sysIDErr
 }
 
-func (f *fakeSink) LastLiveness() (Liveness, error, int) {
+func (f *fakeSink) LastLiveness() (Liveness, int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.liveness, f.lastErr, f.callCount
+	return f.liveness, f.callCount, f.lastErr
 }
 
 // newTestProbe constructs a Probe without starting the loop or opening a connection.
@@ -70,7 +70,7 @@ func TestRecordFailureBelowThreshold(t *testing.T) {
 		p.recordFailure(assertAnError)
 	}
 
-	_, _, calls := sink.LastLiveness()
+	_, calls, _ := sink.LastLiveness()
 	if calls != 0 {
 		t.Fatalf("expected 0 calls to UpdateLiveness (below threshold), got %d", calls)
 	}
@@ -84,7 +84,7 @@ func TestRecordFailureAtThreshold(t *testing.T) {
 		p.recordFailure(assertAnError)
 	}
 
-	liveness, lastErr, calls := sink.LastLiveness()
+	liveness, calls, lastErr := sink.LastLiveness()
 	if calls != 1 {
 		t.Fatalf("expected 1 call to UpdateLiveness (first crossing), got %d", calls)
 	}
@@ -104,7 +104,7 @@ func TestRecordFailureAboveThreshold(t *testing.T) {
 		p.recordFailure(assertAnError)
 	}
 
-	_, lastErr, calls := sink.LastLiveness()
+	_, calls, lastErr := sink.LastLiveness()
 	// Calls happen on every failure past threshold (failures 3, 4, 5).
 	if calls != 3 {
 		t.Fatalf("expected 3 calls to UpdateLiveness (failures 3-5), got %d", calls)
@@ -123,14 +123,14 @@ func TestRecordFailureDefaultThresholdWhenZero(t *testing.T) {
 		p.recordFailure(assertAnError)
 	}
 
-	_, _, calls := sink.LastLiveness()
+	_, calls, _ := sink.LastLiveness()
 	if calls != 0 {
 		t.Fatalf("expected 0 calls below default threshold (3), got %d", calls)
 	}
 
 	p.recordFailure(assertAnError) // cross threshold → first call
 
-	_, _, calls = sink.LastLiveness()
+	_, calls, _ = sink.LastLiveness()
 	if calls != 1 {
 		t.Fatalf("expected 1 call at default threshold (3), got %d", calls)
 	}
@@ -223,7 +223,7 @@ func TestProbeSinkSystemIDErrorCallsRecordFailure(t *testing.T) {
 	// probe.go:189-192: if err := p.sink.UpdateSystemID(...); err != nil { p.recordFailure(err); return }
 	p.recordFailure(sink.sysIDErr)
 
-	liveness, _, calls := sink.LastLiveness()
+	liveness, calls, _ := sink.LastLiveness()
 	if calls != 0 {
 		t.Fatalf("expected 0 calls to UpdateLiveness (below threshold), got %d", calls)
 	}
@@ -241,7 +241,7 @@ func TestProbeSinkSystemIDErrorAtThresholdCausesDown(t *testing.T) {
 		p.recordFailure(sink.sysIDErr)
 	}
 
-	liveness, lastErr, calls := sink.LastLiveness()
+	liveness, calls, lastErr := sink.LastLiveness()
 	if calls != 1 {
 		t.Fatalf("expected 1 call to UpdateLiveness at threshold, got %d", calls)
 	}

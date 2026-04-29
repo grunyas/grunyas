@@ -186,7 +186,7 @@ func TestPoliciesEmpty(t *testing.T) {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
 	var body map[string]interface{}
-	json.Unmarshal(rec.Body.Bytes(), &body)
+	_ = json.Unmarshal(rec.Body.Bytes(), &body)
 	policies, ok := body["policies"].([]interface{})
 	if !ok {
 		t.Fatal("expected 'policies' key with array value")
@@ -267,7 +267,7 @@ func TestConfigPasswordRedacted(t *testing.T) {
 	// Config is behind auth.
 	if rec.Code == http.StatusOK {
 		var body map[string]interface{}
-		json.Unmarshal(rec.Body.Bytes(), &body)
+		_ = json.Unmarshal(rec.Body.Bytes(), &body)
 		t.Fatalf("expected 401 without auth; got 200 body: %+v", body)
 	}
 
@@ -455,6 +455,7 @@ func TestPoolsEmptyTopology(t *testing.T) {
 	}
 	var body map[string]interface{}
 	json.Unmarshal(rec.Body.Bytes(), &body)
+	_ = json.Unmarshal(rec.Body.Bytes(), &body)
 	pools, ok := body["pools"].([]interface{})
 	if !ok {
 		t.Fatal("expected 'pools' key with array value")

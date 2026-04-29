@@ -17,6 +17,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
 
@@ -68,7 +69,7 @@ func New(topo *topology.Topology, cfg *config.Config, log *zap.Logger) *Server {
 	}
 
 	s.metricsReg.MustRegister(newTopologyCollector(topo))
-	s.metricsReg.MustRegister(prometheus.NewBuildInfoCollector())
+	s.metricsReg.MustRegister(collectors.NewBuildInfoCollector())
 
 	s.requestsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "grunyas_admin_requests_total",

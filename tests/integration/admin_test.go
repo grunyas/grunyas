@@ -396,7 +396,7 @@ func stackConfig(t *testing.T, env testEnv) config.Config {
 				Database:              env.database,
 				ConnectTimeoutSeconds: 5,
 			},
-			Pool: config.NodePoolConfig{MinConns: 1, MaxConns: 4},
+			Pool: config.NodePoolConfig{MinConns: 1, MaxConns: 4, HealthCheckPeriod: 60},
 		},
 	}
 	cfg.ProbeConfig = config.DefaultProbeConfig()

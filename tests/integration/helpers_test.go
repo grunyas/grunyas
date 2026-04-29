@@ -134,8 +134,9 @@ func startProxy(t *testing.T, env testEnv) (addr string, stop func()) {
 				ConnectTimeoutSeconds: 5,
 			},
 			Pool: config.NodePoolConfig{
-				MinConns: 1,
-				MaxConns: 4,
+				MinConns:          1,
+				MaxConns:          4,
+				HealthCheckPeriod: 60,
 			},
 		},
 	}
