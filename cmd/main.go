@@ -13,11 +13,14 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/grunyas/grunyas/config"
+	"github.com/grunyas/grunyas/internal/admin"
 	"github.com/grunyas/grunyas/internal/console"
 	"github.com/grunyas/grunyas/internal/logger"
 	"github.com/grunyas/grunyas/internal/server/proxy"
+	"github.com/grunyas/grunyas/internal/topology"
 	"github.com/spf13/viper"
 	"go.uber.org/zap"
 )
@@ -55,7 +58,6 @@ func main() {
 
 	ctx := withSignalContext()
 
-	// Create a channel for logs only if using console
 	var logCh *logger.LoggerChannel
 	var logWriter io.Writer // Use io.Writer to properly pass nil
 	if !*noConsole {
@@ -80,7 +82,72 @@ func main() {
 		}()
 	}
 
-	srv := proxy.Initialize(ctx, &cfg, logger)
+	// -----------------------------------------------------------------------
+	// M1 startup flow (§5 of architecture/M1.md)
+	// -----------------------------------------------------------------------
+
+	topo, err := topology.New(ctx, &cfg, logger)
+	if err != nil {
+		logger.Panic("failed to build topology", zap.Error(err))
+	}
+	defer topo.Close()
+
+	probeTimeout := time.Duration(cfg.ServerConfig.StartupProbeTimeoutSeconds) * time.Second
+	if probeTimeout <= 0 {
+		probeTimeout = 10 * time.Second
+	}
+	probeCtx, probeCancel := context.WithTimeout(ctx, probeTimeout)
+	topo.WaitForInitialProbes(probeCtx)
+	probeCancel()
+
+	if len(cfg.Nodes) > 1 {
+		if sysIDErr := topo.SystemIDError(); sysIDErr != nil {
+			logger.Panic("system_identifier mismatch detected during startup — aborting",
+				zap.Error(sysIDErr))
+		}
+	}
+
+	allDown := true
+	for _, nv := range topo.Nodes() {
+		if !nv.LastProbeAt.IsZero() && nv.LastProbeErr == nil {
+			allDown = false
+			break
+		}
+	}
+	if allDown {
+		logger.Panic("all nodes unreachable at startup — aborting")
+	}
+
+	for _, nv := range topo.Nodes() {
+		if nv.LastProbeErr != nil {
+			logger.Warn("node unreachable at startup — starting as down",
+				zap.String("node", string(nv.ID)),
+				zap.Error(nv.LastProbeErr))
+		}
+	}
+
+	for portID := range cfg.ServerConfig.Ports {
+		if portID != "write" {
+			logger.Warn(fmt.Sprintf("port %q declared but not yet implemented in this version; ignored", portID))
+		}
+	}
+
+	// -----------------------------------------------------------------------
+	// M2: Admin server
+	// -----------------------------------------------------------------------
+
+	adminSrv := admin.New(topo, &cfg, logger)
+	go func() {
+		if err := adminSrv.Run(ctx); err != nil {
+			logger.Warn("admin server exited", zap.Error(err))
+		}
+	}()
+
+	// -----------------------------------------------------------------------
+	// Serve
+	// -----------------------------------------------------------------------
+
+	srv := proxy.Initialize(ctx, &cfg, logger, topo)
 
 	// Run server in background (since it blocks)
 	go func() {
@@ -91,16 +158,35 @@ func main() {
 
 	if *noConsole {
 		<-ctx.Done()
-		return
+	} else {
+		console.Start(ctx, srv, logCh.Channel)
 	}
 
-	// Start interactive console in main thread (blocks until quit)
-	console.Start(ctx, srv, logCh.Channel)
+	logger.Info("shutting down")
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+
+	if err := adminSrv.Close(); err != nil {
+		logger.Warn("admin shutdown error", zap.Error(err))
+	}
+
+	<-shutdownCtx.Done()
+	if shutdownCtx.Err() == context.DeadlineExceeded {
+		logger.Warn("shutdown deadline exceeded, forcing exit")
+	}
 }
 
 func bindEnvKeys() {
 	// Bind server config (non-port fields)
 	serverKeys := []string{
+		"server.admin.listen_addr",
+		"server.admin.tls_enabled",
+		"server.admin.tls_cert_file",
+		"server.admin.tls_key_file",
+		"server.admin.metrics.listen_addr",
+		"server.admin.metrics.auth_required",
+		"server.admin.metrics.tls_enabled",
 		"server.admin_addr",
 		"server.max_sessions",
 		"server.client_idle_timeout",
@@ -126,6 +212,7 @@ func bindEnvKeys() {
 		"probe.liveness_failure_count",
 		"probe.liveness_max_age_ms",
 		"probe.role_max_age_ms",
+		"probe.lag_max_age_ms",
 	}
 
 	// Bind logging, telemetry, auth
@@ -198,14 +285,11 @@ func bindNodeEnvVars(index int) {
 func withSignalContext() context.Context {
 	ctx, cancel := context.WithCancel(context.Background())
 	ch := make(chan os.Signal, 1)
-
 	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
-
 	go func() {
 		sig := <-ch
 		log.Printf("received signal %s, shutting down", sig)
 		cancel()
 	}()
-
 	return ctx
 }

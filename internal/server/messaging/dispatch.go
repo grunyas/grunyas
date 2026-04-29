@@ -16,18 +16,18 @@ func Process(ctx context.Context, msg pgproto3.FrontendMessage, upstream types.U
 	case *pgproto3.Query:
 		return queryUsesSessionState(m.String), ProcessSimpleQuery(m, upstream)
 	case *pgproto3.Parse:
-		// Named prepared statements persist in the backend connection's session
-		// until explicitly closed. Pinning ensures subsequent Bind/Execute messages
-		// reach the same backend connection where the statement was prepared.
-		// Unnamed statements are transient (overwritten on next Parse) — no pin needed.
-		return m.Name != "", ProcessParse(m, upstream)
+		// Extended-protocol Parse never pins: pgx auto-names statements
+		// (stmtcache_<hash>), so name-based pinning would permanently pin every
+		// connection without benefit. Persistent prepared statements arrive as
+		// a simple Query "PREPARE ..." which is handled above.
+		return false, ProcessParse(m, upstream)
 	case *pgproto3.Bind:
-		// Pin when binding a named prepared statement; the statement lives on a
-		// specific backend connection and must be reachable for Execute.
-		return m.PreparedStatement != "", ProcessBind(m, upstream)
+		// Extended-protocol Bind never pins (see Parse reasoning above).
+		return false, ProcessBind(m, upstream)
 	case *pgproto3.Describe:
-		// Pin only for named statement Describes; portal Describes are transient.
-		return m.ObjectType == 'S' && m.Name != "", ProcessDescribe(m, upstream)
+		// Describe never pins (see Parse reasoning above for statements;
+		// portals are transient regardless).
+		return false, ProcessDescribe(m, upstream)
 	case *pgproto3.Execute:
 		return false, ProcessExecute(m, upstream)
 	case *pgproto3.Sync:

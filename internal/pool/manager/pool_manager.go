@@ -7,14 +7,31 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/jackc/pgx/v5/tracelog"
 	"github.com/grunyas/grunyas/config"
 	"github.com/grunyas/grunyas/internal/pool/upstream_client"
 	"github.com/grunyas/grunyas/internal/server/types"
 	"github.com/grunyas/grunyas/internal/utils/pgx_log_adapter"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/tracelog"
 	"go.uber.org/zap"
 )
+
+// Manager defines the interface for a per-node pool manager.
+type Manager interface {
+	AcquireDbConnection() (types.UpstreamClientInterface, error)
+	PoolStats() types.PoolStats
+	Close()
+}
+
+// NodeSpec describes a backend node for pool construction.
+type NodeSpec struct {
+	ID         string
+	Host       string
+	Port       uint16
+	Connection config.NodeConnectionConfig
+	Pool       config.NodePoolConfig
+	DiscardAll bool
+}
 
 type PoolManager struct {
 	ctx context.Context
@@ -24,29 +41,23 @@ type PoolManager struct {
 	discardAll bool // true only in session mode
 }
 
-func Initialize(prx types.ProxyInterface) *PoolManager {
-	ctx := prx.GetContext()
-	cfg := prx.GetConfig().BackendConfig
-	logger := prx.GetLogger()
-	discardAll := prx.GetConfig().ServerConfig.PoolMode == config.PoolModeSession
-
-	// Initialize connection pool
-	poolConfig, err := pgxpool.ParseConfig(DatabaseDSN(cfg))
+// New creates a pool manager for a single node from a NodeSpec.
+func New(ctx context.Context, spec NodeSpec, log *zap.Logger) (*PoolManager, error) {
+	dsn := databaseDSN(spec.Host, int(spec.Port), spec.Connection, spec.Pool)
+	poolConfig, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		panic(fmt.Errorf("failed to parse pool config: %w", err))
 	}
 
-	// Configure pool settings
-	poolConfig.MinConns = int32(cfg.PoolMinConns)
-	poolConfig.MaxConns = int32(cfg.PoolMaxConns)
-	poolConfig.MaxConnLifetime = time.Duration(cfg.PoolMaxConnLifetime) * time.Second
-	poolConfig.MaxConnIdleTime = time.Duration(cfg.PoolMaxConnIdleTime) * time.Second
-	poolConfig.HealthCheckPeriod = time.Duration(cfg.PoolHealthCheckPeriod) * time.Second
+	poolConfig.MinConns = int32(spec.Pool.MinConns)
+	poolConfig.MaxConns = int32(spec.Pool.MaxConns)
+	poolConfig.MaxConnLifetime = time.Duration(spec.Pool.MaxConnLifetime) * time.Second
+	poolConfig.MaxConnIdleTime = time.Duration(spec.Pool.MaxConnIdleTime) * time.Second
+	poolConfig.HealthCheckPeriod = time.Duration(spec.Pool.HealthCheckPeriod) * time.Second
 
-	// Configure logging for background connection events
 	poolConfig.ConnConfig.Tracer = &tracelog.TraceLog{
-		Logger:   pgx_log_adapter.Initialize(logger),
-		LogLevel: tracelog.LogLevelDebug, // Debug to see connection lifecycle events
+		Logger:   pgx_log_adapter.Initialize(log),
+		LogLevel: tracelog.LogLevelDebug,
 	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
@@ -56,10 +67,10 @@ func Initialize(prx types.ProxyInterface) *PoolManager {
 
 	return &PoolManager{
 		ctx:        ctx,
-		logger:     logger,
+		logger:     log,
 		pool:       pool,
-		discardAll: discardAll,
-	}
+		discardAll: spec.DiscardAll,
+	}, nil
 }
 
 // AcquireDbConnection acquires a connection from the database pool.
@@ -108,24 +119,24 @@ func (pm *PoolManager) Close() {
 	pm.pool.Close()
 }
 
-func DatabaseDSN(cfg config.DatabasePoolConfig) string {
+func databaseDSN(host string, port int, connCfg config.NodeConnectionConfig, _ config.NodePoolConfig) string {
 	u := &url.URL{
 		Scheme: "postgres",
-		Host:   fmt.Sprintf("%s:%d", cfg.DatabaseHost, cfg.DatabasePort),
-		Path:   cfg.DatabaseName,
+		Host:   fmt.Sprintf("%s:%d", host, port),
+		Path:   connCfg.Database,
 	}
 
-	if cfg.DatabaseUser != "" {
-		if cfg.DatabasePassword != "" {
-			u.User = url.UserPassword(cfg.DatabaseUser, cfg.DatabasePassword)
+	if connCfg.User != "" {
+		if connCfg.Password != "" {
+			u.User = url.UserPassword(connCfg.User, connCfg.Password)
 		} else {
-			u.User = url.User(cfg.DatabaseUser)
+			u.User = url.User(connCfg.User)
 		}
 	}
 
 	q := u.Query()
-	if cfg.DatabaseConnectTimeoutSeconds > 0 {
-		q.Set("connect_timeout", strconv.Itoa(cfg.DatabaseConnectTimeoutSeconds))
+	if connCfg.ConnectTimeoutSeconds > 0 {
+		q.Set("connect_timeout", strconv.Itoa(connCfg.ConnectTimeoutSeconds))
 	}
 
 	u.RawQuery = q.Encode()

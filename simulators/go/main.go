@@ -308,4 +308,3 @@ func computeLatency(latencies []time.Duration) LatencyStats {
 		P99Ms: float64(sorted[min(n*99/100, n-1)].Microseconds()) / 1000,
 	}
 }
-

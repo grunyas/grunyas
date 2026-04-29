@@ -2,56 +2,52 @@ package config
 
 // ServerConfig holds server-wide settings and port definitions.
 type ServerConfig struct {
-	AdminAddr string `mapstructure:"admin_addr"` // Formatted as host:port
+	// Admin holds the admin HTTP API server configuration (M2+).
+	Admin AdminConfig `mapstructure:"admin" json:"admin"`
 
 	// MaxSessions is the maximum number of concurrent client sessions allowed.
-	// If zero, there is no limit.
-	MaxSessions int `mapstructure:"max_sessions"`
+	MaxSessions int `mapstructure:"max_sessions" json:"max_sessions"`
 
-	// ClientIdleTimeout, in seconds, is the duration a client can stay connected without any activity
-	// (no queries sent to the server) before the connection is closed. If zero (default),
-	// idle connections are not closed.
-	ClientIdleTimeout int `mapstructure:"client_idle_timeout"`
+	// ClientIdleTimeout, in seconds, is the duration a client can stay connected
+	// without any activity before the connection is closed.
+	ClientIdleTimeout int `mapstructure:"client_idle_timeout" json:"client_idle_timeout"`
 
-	// KeepAliveTimeout, in seconds, is the time that the connection must be idle before
-	// the first keep-alive probe is sent.
-	// If zero, a default value of 15 seconds is used.
-	KeepAliveTimeout int `mapstructure:"keep_alive_timeout"`
+	// KeepAliveTimeout, in seconds, is the idle time before the first keep-alive probe.
+	KeepAliveTimeout int `mapstructure:"keep_alive_timeout" json:"keep_alive_timeout"`
 
 	// KeepAliveInterval, in seconds, is the time between keep-alive probes.
-	// If zero, a default value of 15 seconds is used.
-	KeepAliveInterval int `mapstructure:"keep_alive_interval"`
+	KeepAliveInterval int `mapstructure:"keep_alive_interval" json:"keep_alive_interval"`
 
-	// KeepAliveCount is the maximum number of keep-alive probes that
-	// can go unanswered before dropping a connection.
-	// If zero, a default value of 9 is used.
-	KeepAliveCount int `mapstructure:"keep_alive_count"`
+	// KeepAliveCount is the max unanswered keep-alive probes before dropping.
+	KeepAliveCount int `mapstructure:"keep_alive_count" json:"keep_alive_count"`
 
-	// StartupProbeTimeoutSeconds is the maximum time (in seconds) to wait for the first
-	// probe cycle on all nodes during startup. If zero, defaults to 10 seconds.
-	StartupProbeTimeoutSeconds int `mapstructure:"startup_probe_timeout_seconds"`
+	// StartupProbeTimeoutSeconds is the max time to wait for first probe cycle.
+	StartupProbeTimeoutSeconds int `mapstructure:"startup_probe_timeout_seconds" json:"startup_probe_timeout_seconds"`
 
 	// Ports holds configuration for each listen port (write, read, compat).
-	Ports map[string]PortConfig `mapstructure:"ports"` // Keys: "write", "read", "compat"
+	Ports map[string]PortConfig `mapstructure:"ports" json:"ports"`
 
-	// PprofAddr enables the Go pprof HTTP server on the given address.
-	// Example: "0.0.0.0:6060". If empty (default), pprof is disabled.
-	PprofAddr string `mapstructure:"pprof_addr"`
+	// PprofAddr enables the Go pprof HTTP server.
+	PprofAddr string `mapstructure:"pprof_addr" json:"pprof_addr"`
 
-	// --- Derived legacy fields (M1 shim) -----------------------------------
-	// These mirror the write-port settings so existing call sites that have
-	// not yet been migrated to per-port lookups keep compiling. Populated by
-	// Config.Normalize() after Unmarshal. Not read from TOML/env directly.
-	// Removed in M1 PR 2 once call sites use Topology + per-port routing.
-	ListenAddr string   `mapstructure:"-"`
-	PoolMode   PoolMode `mapstructure:"-"`
-	SSLMode    string   `mapstructure:"-"`
-	SSLCert    string   `mapstructure:"-"`
-	SSLKey     string   `mapstructure:"-"`
+	// AdminTokens holds bearer tokens for admin API authentication (M2+).
+	AdminTokens AdminTokenConfig `mapstructure:"admin_tokens" json:"admin_tokens"`
+
+	// --- Deprecated fields (M1 compatibility) -----------------------------
+	// AdminAddr is the legacy flat admin_addr (M1). It populates Admin.ListenAddr
+	// during Normalize() if Admin.ListenAddr is empty. Accepted with a
+	// deprecation warning for one release, then removed.
+	AdminAddr string `mapstructure:"admin_addr" json:"admin_addr,omitempty"`
+
+	// --- Derived legacy fields (M1 shim) ----------------------------------
+	ListenAddr string   `mapstructure:"-" json:"-"`
+	PoolMode   PoolMode `mapstructure:"-" json:"-"`
+	SSLMode    string   `mapstructure:"-" json:"-"`
+	SSLCert    string   `mapstructure:"-" json:"-"`
+	SSLKey     string   `mapstructure:"-" json:"-"`
 }
 
 // GetWritePort returns the write port configuration.
-// Returns an empty PortConfig and false if the write port is not configured.
 func (s ServerConfig) GetWritePort() (PortConfig, bool) {
 	if s.Ports == nil {
 		return PortConfig{}, false
@@ -60,15 +56,14 @@ func (s ServerConfig) GetWritePort() (PortConfig, bool) {
 	return port, ok
 }
 
-// GetWritePoolMode returns the pool mode for the write port.
-// Defaults to "session" if not configured or invalid.
+// GetWritePoolMode returns the pool mode for the write port. Defaults to session.
 func (s ServerConfig) GetWritePoolMode() PoolMode {
 	if port, ok := s.GetWritePort(); ok {
 		if m, ok := PoolModeFromString(port.PoolMode); ok {
 			return m
 		}
 	}
-	return PoolModeSession // default
+	return PoolModeSession
 }
 
 // PoolMode represents the connection pooling mode.
@@ -80,12 +75,10 @@ const (
 )
 
 // PoolModeFromString parses a string into a PoolMode.
-// Returns ("", false) for unknown values so the validator can detect them.
-// Empty string is treated as a known value (session default).
 func PoolModeFromString(s string) (PoolMode, bool) {
 	switch s {
 	case "":
-		return PoolModeSession, true // default
+		return PoolModeSession, true
 	case "session":
 		return PoolModeSession, true
 	case "transaction":

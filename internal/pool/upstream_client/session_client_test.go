@@ -321,9 +321,9 @@ func TestSimpleQuerySkipsStaleReadyForQuery(t *testing.T) {
 	tc := &testableClient{conn: &mockConn{
 		txStatus: 'I',
 		messages: []pgproto3.BackendMessage{
-			&pgproto3.ReadyForQuery{TxStatus: 'I'},         // stale — must be skipped
+			&pgproto3.ReadyForQuery{TxStatus: 'I'},                       // stale — must be skipped
 			&pgproto3.CommandComplete{CommandTag: []byte("DISCARD ALL")}, // real response
-			&pgproto3.ReadyForQuery{TxStatus: 'I'},         // real terminal RFQ
+			&pgproto3.ReadyForQuery{TxStatus: 'I'},                       // real terminal RFQ
 		},
 	}}
 

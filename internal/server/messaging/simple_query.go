@@ -1,8 +1,8 @@
 package messaging
 
 import (
-	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/grunyas/grunyas/internal/server/types"
+	"github.com/jackc/pgx/v5/pgproto3"
 )
 
 func ProcessSimpleQuery(msg *pgproto3.Query, upstream types.UpstreamClientInterface) error {

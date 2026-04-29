@@ -9,26 +9,8 @@ import (
 
 	"github.com/grunyas/grunyas/config"
 	"github.com/grunyas/grunyas/internal/auth"
-	pool "github.com/grunyas/grunyas/internal/pool/manager"
 	"github.com/grunyas/grunyas/internal/server/session"
 )
-
-func TestBackendDSN(t *testing.T) {
-	cfg := config.DatabasePoolConfig{
-		DatabaseHost:                  "db",
-		DatabasePort:                  5433,
-		DatabaseUser:                  "alice",
-		DatabasePassword:              "secret",
-		DatabaseName:                  "mydb",
-		DatabaseConnectTimeoutSeconds: 7,
-	}
-
-	dsn := pool.DatabaseDSN(cfg)
-	want := "postgres://alice:secret@db:5433/mydb?connect_timeout=7"
-	if dsn != want {
-		t.Fatalf("unexpected dsn, got %q want %q", dsn, want)
-	}
-}
 
 func TestCanAcceptNewSessionRespectsMax(t *testing.T) {
 	srv := newTestServer(t, func(c *config.Config) {
@@ -60,14 +42,6 @@ func newTestServer(t *testing.T, mutate func(*config.Config)) *Proxy {
 			KeepAliveTimeout:  15,
 			KeepAliveInterval: 15,
 			KeepAliveCount:    9,
-		},
-		BackendConfig: config.DatabasePoolConfig{
-			DatabaseHost:                  "localhost",
-			DatabasePort:                  5432,
-			DatabaseUser:                  "postgres",
-			DatabasePassword:              "postgres",
-			DatabaseName:                  "postgres",
-			DatabaseConnectTimeoutSeconds: 1,
 		},
 		Logging: config.LoggingConfig{
 			Level:       "info",

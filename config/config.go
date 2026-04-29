@@ -9,21 +9,15 @@ import (
 )
 
 type Config struct {
-	ServerConfig ServerConfig    `mapstructure:"server"`
-	Nodes        []NodeConfig    `mapstructure:"nodes"`
-	ProbeConfig  ProbeConfig     `mapstructure:"probe"`
-	Logging      LoggingConfig   `mapstructure:"logging"`
-	Telemetry    TelemetryConfig `mapstructure:"telemetry"`
-	Auth         AuthConfig      `mapstructure:"auth"`
-
-	// BackendConfig is a derived legacy view of the primary node (M1 shim).
-	// Populated by Normalize(); not read from TOML/env. Removed in M1 PR 2
-	// when pool manager is refactored to per-node + Topology lookups.
-	BackendConfig DatabasePoolConfig `mapstructure:"-"`
+	ServerConfig ServerConfig    `mapstructure:"server" json:"server"`
+	Nodes        []NodeConfig    `mapstructure:"nodes" json:"nodes"`
+	ProbeConfig  ProbeConfig     `mapstructure:"probe" json:"probe"`
+	Logging      LoggingConfig   `mapstructure:"logging" json:"logging"`
+	Telemetry    TelemetryConfig `mapstructure:"telemetry" json:"telemetry"`
+	Auth         AuthConfig      `mapstructure:"auth" json:"auth"`
 }
 
-// PrimaryNode returns a pointer to the node with declared_role="primary",
-// or nil if none is configured. M1 guarantees exactly one primary at validation.
+// PrimaryNode returns a pointer to the node with declared_role="primary".
 func (c *Config) PrimaryNode() *NodeConfig {
 	for i := range c.Nodes {
 		if strings.EqualFold(c.Nodes[i].DeclaredRole, "primary") {
@@ -33,12 +27,7 @@ func (c *Config) PrimaryNode() *NodeConfig {
 	return nil
 }
 
-// Normalize populates the derived legacy shim fields (ServerConfig.ListenAddr,
-// SSLMode/Cert/Key, PoolMode and BackendConfig) from the new schema. Call this
-// after Unmarshal and before passing the config to the proxy. Idempotent.
-//
-// This is an M1-only bridge. PR 2 removes the legacy fields and updates call
-// sites to read from the new schema directly.
+// Normalize populates derived fields and handles M1→M2 config migration.
 func (c *Config) Normalize() {
 	if write, ok := c.ServerConfig.GetWritePort(); ok {
 		c.ServerConfig.ListenAddr = write.ListenAddr
@@ -48,26 +37,21 @@ func (c *Config) Normalize() {
 		c.ServerConfig.PoolMode = c.ServerConfig.GetWritePoolMode()
 	}
 
-	if p := c.PrimaryNode(); p != nil {
-		c.BackendConfig = DatabasePoolConfig{
-			DatabaseHost:                  p.Host,
-			DatabasePort:                  p.Port,
-			DatabaseUser:                  p.Connection.User,
-			DatabasePassword:              p.Connection.Password,
-			DatabaseName:                  p.Connection.Database,
-			DatabaseConnectTimeoutSeconds: p.Connection.ConnectTimeoutSeconds,
-			PoolMinConns:                  p.Pool.MinConns,
-			PoolMaxConns:                  p.Pool.MaxConns,
-			PoolMaxConnLifetime:           p.Pool.MaxConnLifetime,
-			PoolMaxConnIdleTime:           p.Pool.MaxConnIdleTime,
-			PoolHealthCheckPeriod:         p.Pool.HealthCheckPeriod,
-		}
+	// M1→M2 admin config migration: populate Admin.ListenAddr from the
+	// legacy flat AdminAddr when the new Admin.ListenAddr is not set.
+	if c.ServerConfig.Admin.ListenAddr == "" && c.ServerConfig.AdminAddr != "" {
+		c.ServerConfig.Admin.ListenAddr = c.ServerConfig.AdminAddr
+	} else if c.ServerConfig.Admin.ListenAddr == "" {
+		// Fall back to default.
+		c.ServerConfig.Admin.ListenAddr = DefaultAdminConfig().ListenAddr
+		_ = c.ServerConfig.AdminAddr // suppress unused check; kept for deprecation
 	}
+
+	// BackendConfig derivation removed in M1+M2 refactor.
+	// Per-node pool managers are constructed by topology.New from cfg.Nodes.
 }
 
-// Default returns sensible defaults for local use. The returned config is
-// already Normalize()d, so legacy shim fields (BackendConfig, ServerConfig
-// ListenAddr/PoolMode/SSL*) are populated.
+// Default returns sensible defaults for local use.
 func Default() Config {
 	c := defaultConfig()
 	c.Normalize()
@@ -77,9 +61,10 @@ func Default() Config {
 func defaultConfig() Config {
 	return Config{
 		ServerConfig: ServerConfig{
+			Admin:                      DefaultAdminConfig(),
 			AdminAddr:                  "127.0.0.1:5712",
 			MaxSessions:                1000,
-			ClientIdleTimeout:          300, // seconds
+			ClientIdleTimeout:          300,
 			KeepAliveTimeout:           15,
 			KeepAliveInterval:          15,
 			KeepAliveCount:             9,
@@ -110,9 +95,9 @@ func defaultConfig() Config {
 				Pool: NodePoolConfig{
 					MinConns:          2,
 					MaxConns:          10,
-					MaxConnLifetime:   3600, // 1 hour
-					MaxConnIdleTime:   1800, // 30 minutes
-					HealthCheckPeriod: 60,   // 1 minute
+					MaxConnLifetime:   3600,
+					MaxConnIdleTime:   1800,
+					HealthCheckPeriod: 60,
 				},
 			},
 		},
@@ -160,31 +145,35 @@ func (c *Config) Validate() error {
 		errs = append(errs, "auth.password is required")
 	}
 
-	// Server config validation
-	if err := validateHostPort("server.admin_addr", c.ServerConfig.AdminAddr); err != nil {
+	// Admin config validation
+	if err := validateHostPort("server.admin.listen_addr", c.ServerConfig.Admin.ListenAddr); err != nil {
 		errs = append(errs, err.Error())
 	}
+	if c.ServerConfig.Admin.TLSEnabled {
+		if c.ServerConfig.Admin.TLSCertFile == "" {
+			errs = append(errs, "server.admin.tls_cert_file is required when tls_enabled is true")
+		}
+		if c.ServerConfig.Admin.TLSKeyFile == "" {
+			errs = append(errs, "server.admin.tls_key_file is required when tls_enabled is true")
+		}
+	}
 
+	// Server config validation
 	if c.ServerConfig.MaxSessions < 0 {
 		errs = append(errs, "server.max_sessions must be >= 0")
 	}
-
 	if c.ServerConfig.ClientIdleTimeout < 0 {
 		errs = append(errs, "server.client_idle_timeout must be >= 0")
 	}
-
 	if c.ServerConfig.KeepAliveTimeout < 0 {
 		errs = append(errs, "server.keep_alive_timeout must be >= 0")
 	}
-
 	if c.ServerConfig.KeepAliveInterval < 0 {
 		errs = append(errs, "server.keep_alive_interval must be >= 0")
 	}
-
 	if c.ServerConfig.KeepAliveCount < 0 {
 		errs = append(errs, "server.keep_alive_count must be >= 0")
 	}
-
 	if c.ServerConfig.StartupProbeTimeoutSeconds < 0 {
 		errs = append(errs, "server.startup_probe_timeout_seconds must be >= 0")
 	}
@@ -193,7 +182,6 @@ func (c *Config) Validate() error {
 	if len(c.ServerConfig.Ports) == 0 {
 		errs = append(errs, "server.ports is required")
 	}
-
 	if _, ok := c.ServerConfig.Ports["write"]; !ok {
 		errs = append(errs, "server.ports.write is required")
 	}
@@ -211,7 +199,6 @@ func (c *Config) Validate() error {
 
 		switch strings.ToLower(port.SSLMode) {
 		case "", "never":
-			// No validation needed for certs if SSL is disabled
 		case "optional", "mandatory":
 			if port.SSLCert == "" {
 				errs = append(errs, fmt.Sprintf("server.ports.%s.ssl_cert is required when ssl_mode is optional or mandatory", portID))
@@ -236,50 +223,41 @@ func (c *Config) Validate() error {
 	for i, node := range c.Nodes {
 		prefix := fmt.Sprintf("nodes[%d]", i)
 
-		// ID validation
 		if node.ID == "" {
 			errs = append(errs, fmt.Sprintf("%s.id is required", prefix))
 		} else if seenIDs[node.ID] {
 			errs = append(errs, fmt.Sprintf("%s.id '%s' is duplicate", prefix, node.ID))
 		} else {
 			seenIDs[node.ID] = true
-			// Validate ID format: URL-safe lowercase characters
 			for _, r := range node.ID {
-				if !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9') && r != '-' {
+				if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' {
 					errs = append(errs, fmt.Sprintf("%s.id must be lowercase URL-safe (a-z0-9-)", prefix))
 					break
 				}
 			}
 		}
 
-		// Host validation
 		if node.Host == "" {
 			errs = append(errs, fmt.Sprintf("%s.host is required", prefix))
 		}
-
-		// Port validation
 		if node.Port <= 0 || node.Port > 65535 {
 			errs = append(errs, fmt.Sprintf("%s.port must be in the range 1-65535", prefix))
 		}
 
-		// Host:port uniqueness
 		hostPort := fmt.Sprintf("%s:%d", node.Host, node.Port)
 		if seenHostPorts[hostPort] {
 			errs = append(errs, fmt.Sprintf("%s host:port tuple '%s' is duplicate", prefix, hostPort))
 		}
 		seenHostPorts[hostPort] = true
 
-		// Declared role validation
 		switch strings.ToLower(node.DeclaredRole) {
 		case "primary":
 			primaryCount++
 		case "replica":
-			// ok
 		default:
 			errs = append(errs, fmt.Sprintf("%s.declared_role must be 'primary' or 'replica', got '%s'", prefix, node.DeclaredRole))
 		}
 
-		// Connection config validation
 		if node.Connection.User == "" {
 			errs = append(errs, fmt.Sprintf("%s.connection.user is required", prefix))
 		}
@@ -289,12 +267,10 @@ func (c *Config) Validate() error {
 		if node.Connection.ConnectTimeoutSeconds < 0 {
 			errs = append(errs, fmt.Sprintf("%s.connection.connect_timeout_seconds must be >= 0", prefix))
 		}
-		// In M1, only "disable" is accepted for upstream SSL
 		if node.Connection.SSLMode != "" && node.Connection.SSLMode != "disable" {
 			errs = append(errs, fmt.Sprintf("%s.connection.ssl_mode must be 'disable' in M1", prefix))
 		}
 
-		// Pool config validation
 		if node.Pool.MinConns < 0 {
 			errs = append(errs, fmt.Sprintf("%s.pool.min_conns must be >= 0", prefix))
 		}
@@ -315,7 +291,6 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	// Exactly one primary required
 	if primaryCount != 1 {
 		errs = append(errs, fmt.Sprintf("exactly one node with declared_role='primary' required, got %d", primaryCount))
 	}
@@ -334,6 +309,13 @@ func (c *Config) Validate() error {
 		errs = append(errs, "probe.role_max_age_ms must be >= 0")
 	}
 
+	// Validate admin tokens
+	for token := range c.ServerConfig.AdminTokens.Tokens {
+		if token == "" {
+			errs = append(errs, "server.admin_tokens.tokens: token must not be empty")
+		}
+	}
+
 	if len(errs) > 0 {
 		return fmt.Errorf("config validation failed: %s", strings.Join(errs, "; "))
 	}
@@ -345,10 +327,8 @@ func validateHostPort(field, value string) error {
 	if value == "" {
 		return fmt.Errorf("%s is required", field)
 	}
-
 	if _, _, err := net.SplitHostPort(value); err != nil {
 		return fmt.Errorf("%s must be formatted as host:port: %v", field, err)
 	}
-
 	return nil
 }
