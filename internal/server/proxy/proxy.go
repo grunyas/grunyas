@@ -11,18 +11,18 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgproto3"
-	"go.uber.org/zap"
-
 	"crypto/tls"
 	"strings"
 
+	"github.com/jackc/pgx/v5/pgproto3"
+	"go.uber.org/zap"
+
 	"github.com/grunyas/grunyas/config"
 	"github.com/grunyas/grunyas/internal/auth"
-	pool "github.com/grunyas/grunyas/internal/pool/manager"
 	"github.com/grunyas/grunyas/internal/server/downstream_client"
 	"github.com/grunyas/grunyas/internal/server/session"
 	"github.com/grunyas/grunyas/internal/server/types"
+	"github.com/grunyas/grunyas/internal/topology"
 )
 
 // Proxy represents the main server instance.
@@ -39,7 +39,7 @@ type Proxy struct {
 
 	ln       net.Listener
 	sessions map[*session.Session]struct{}
-	poolMgr  types.PoolManagerInterface
+	topo     *topology.Topology
 
 	idle  *idleSweeper
 	ready chan struct{}
@@ -50,10 +50,11 @@ type Proxy struct {
 	lifetimeConnectionsCount atomic.Int64
 }
 
-// Initialize creates a new Proxy instance with the provided context, configuration, and logger.
-// It initializes the backend connection pool and prepares the authentication mechanisms.
+// Initialize creates a new Proxy instance with the provided context, configuration,
+// logger, and topology. The topology provides per-node pool managers; the proxy
+// acquires upstream connections from topology.PoolFor(primary.ID).
 // It panics if config or logger are nil, or if initialization of sub-components fails.
-func Initialize(ctx context.Context, cfg *config.Config, logger *zap.Logger) *Proxy {
+func Initialize(ctx context.Context, cfg *config.Config, logger *zap.Logger, topo *topology.Topology) *Proxy {
 	if cfg == nil {
 		panic("config cannot be nil")
 	}
@@ -88,6 +89,7 @@ func Initialize(ctx context.Context, cfg *config.Config, logger *zap.Logger) *Pr
 		ctx:       ctx,
 		logger:    logger,
 		auth:      authn,
+		topo:      topo,
 		sessions:  make(map[*session.Session]struct{}),
 		idle:      newIdleSweeper(idleTimeout),
 		ready:     make(chan struct{}),
@@ -95,16 +97,10 @@ func Initialize(ctx context.Context, cfg *config.Config, logger *zap.Logger) *Pr
 	}
 }
 
-// Run initializes the database connection pool and starts the TCP listener.
+// Run starts the TCP listener and serves client connections.
 // It runs until the context is canceled or a fatal error occurs during listener startup.
 // It also starts the idle connection sweeper background task.
 func (prx *Proxy) Run() error {
-	prx.poolMgr = pool.Initialize(prx)
-	defer func() {
-		prx.logger.Info("closing connection pool")
-		prx.poolMgr.Close()
-	}()
-
 	ln, err := net.Listen("tcp", prx.cfg.ServerConfig.ListenAddr)
 	if err != nil {
 		return err
@@ -159,12 +155,21 @@ func (prx *Proxy) GetConfig() *config.Config {
 	return prx.cfg
 }
 
-// PoolStats returns the current statistics of the database connection pool.
+// PoolStats returns the current statistics of the primary's database connection pool.
+// Returns zero-value PoolStats if no primary is currently observed.
 func (prx *Proxy) PoolStats() types.PoolStats {
-	if prx.poolMgr == nil {
+	if prx.topo == nil {
 		return types.PoolStats{}
 	}
-	return prx.poolMgr.PoolStats()
+	primary, ok := prx.topo.Primary()
+	if !ok {
+		return types.PoolStats{}
+	}
+	mgr, err := prx.topo.PoolFor(primary.ID)
+	if err != nil {
+		return types.PoolStats{}
+	}
+	return mgr.PoolStats()
 }
 
 // GetAuthMethod returns the configured authentication method.
@@ -193,12 +198,21 @@ func (prx *Proxy) NewSCRAMSession() (types.SCRAMSession, error) {
 	return prx.auth.NewSCRAMSession()
 }
 
-// AcquireUpstream acquires a connection from the database pool.
+// AcquireUpstream acquires a connection from the primary node's pool.
+// Returns 57P03 when no primary is observed (M1 §6).
 func (prx *Proxy) AcquireUpstream() (types.UpstreamClientInterface, error) {
-	if prx.poolMgr == nil {
-		return nil, fmt.Errorf("connection pool not initialized")
+	if prx.topo == nil {
+		return nil, &types.ProxyError{Code: "57P03", Message: "[grunyas] no primary available"}
 	}
-	return prx.poolMgr.AcquireDbConnection()
+	primary, ok := prx.topo.Primary()
+	if !ok {
+		return nil, &types.ProxyError{Code: "57P03", Message: "[grunyas] no primary available"}
+	}
+	mgr, err := prx.topo.PoolFor(primary.ID)
+	if err != nil {
+		return nil, &types.ProxyError{Code: "57P03", Message: "[grunyas] no primary available"}
+	}
+	return mgr.AcquireDbConnection()
 }
 
 // Ready returns a channel that is closed when the proxy is successfully listening

@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/grunyas/grunyas/config"
 	"github.com/grunyas/grunyas/internal/server/proxy"
+	"github.com/grunyas/grunyas/internal/topology"
 	"go.uber.org/zap"
 )
 
@@ -120,17 +121,34 @@ func startProxy(t *testing.T, env testEnv) (addr string, stop func()) {
 	cfg.Auth.Username = env.user
 	cfg.Auth.Password = env.password
 
-	cfg.BackendConfig.DatabaseHost = env.host
-	cfg.BackendConfig.DatabasePort = env.port
-	cfg.BackendConfig.DatabaseUser = env.user
-	cfg.BackendConfig.DatabasePassword = env.password
-	cfg.BackendConfig.DatabaseName = env.database
-	cfg.BackendConfig.PoolMinConns = 1
-	cfg.BackendConfig.PoolMaxConns = 4
-	cfg.BackendConfig.DatabaseConnectTimeoutSeconds = 5
+	cfg.Nodes = []config.NodeConfig{
+		{
+			ID:           "primary-1",
+			Host:         env.host,
+			Port:         env.port,
+			DeclaredRole: "primary",
+			Connection: config.NodeConnectionConfig{
+				User:                  env.user,
+				Password:              env.password,
+				Database:              env.database,
+				ConnectTimeoutSeconds: 5,
+			},
+			Pool: config.NodePoolConfig{
+				MinConns: 1,
+				MaxConns: 4,
+			},
+		},
+	}
+	cfg.ProbeConfig = config.DefaultProbeConfig()
+	cfg.Normalize()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	prx := proxy.Initialize(ctx, &cfg, zap.NewNop())
+	topo, err := topology.New(ctx, &cfg, zap.NewNop())
+	if err != nil {
+		t.Fatalf("failed to build topology: %v", err)
+	}
+	t.Cleanup(topo.Close)
+	prx := proxy.Initialize(ctx, &cfg, zap.NewNop(), topo)
 
 	errCh := make(chan error, 1)
 	go func() {

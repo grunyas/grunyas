@@ -199,9 +199,6 @@ func TestNormalizePopulatesLegacyShim(t *testing.T) {
 	if cfg.ServerConfig.ListenAddr != "" {
 		t.Fatalf("expected ListenAddr to be empty before Normalize, got %q", cfg.ServerConfig.ListenAddr)
 	}
-	if cfg.BackendConfig.DatabaseHost != "" {
-		t.Fatalf("expected BackendConfig empty before Normalize")
-	}
 
 	cfg.Normalize()
 
@@ -210,12 +207,6 @@ func TestNormalizePopulatesLegacyShim(t *testing.T) {
 	}
 	if cfg.ServerConfig.PoolMode != PoolModeSession {
 		t.Fatalf("expected derived PoolMode=session, got %q", cfg.ServerConfig.PoolMode)
-	}
-	if cfg.BackendConfig.DatabaseHost != "localhost" {
-		t.Fatalf("expected derived BackendConfig.DatabaseHost=localhost, got %q", cfg.BackendConfig.DatabaseHost)
-	}
-	if cfg.BackendConfig.PoolMaxConns != 10 {
-		t.Fatalf("expected derived BackendConfig.PoolMaxConns=10, got %d", cfg.BackendConfig.PoolMaxConns)
 	}
 }
 
