@@ -52,10 +52,7 @@ func TestAdminStateWithPrimary(t *testing.T) {
 	// Wait for at least one probe cycle so the primary is observed.
 	time.Sleep(1500 * time.Millisecond)
 
-	resp, err := http.Get(fmt.Sprintf("http://%s/state", adminAddr))
-	if err != nil {
-		t.Fatalf("GET /state: %v", err)
-	}
+	resp := authedGet(t, fmt.Sprintf("http://%s/state", adminAddr))
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
@@ -153,10 +150,7 @@ func TestAdminNodesEndpoint(t *testing.T) {
 
 	time.Sleep(1500 * time.Millisecond)
 
-	resp, err := http.Get(fmt.Sprintf("http://%s/nodes", adminAddr))
-	if err != nil {
-		t.Fatalf("GET /nodes: %v", err)
-	}
+	resp := authedGet(t, fmt.Sprintf("http://%s/nodes", adminAddr))
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
@@ -181,10 +175,7 @@ func TestAdminNodeByID(t *testing.T) {
 
 	time.Sleep(1500 * time.Millisecond)
 
-	resp, err := http.Get(fmt.Sprintf("http://%s/nodes/primary-1", adminAddr))
-	if err != nil {
-		t.Fatalf("GET /nodes/primary-1: %v", err)
-	}
+	resp := authedGet(t, fmt.Sprintf("http://%s/nodes/primary-1", adminAddr))
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
@@ -203,10 +194,7 @@ func TestAdminNodeByIDNotFound(t *testing.T) {
 	_, adminAddr, stop := startStack(t, env)
 	defer stop()
 
-	resp, err := http.Get(fmt.Sprintf("http://%s/nodes/nonexistent", adminAddr))
-	if err != nil {
-		t.Fatalf("GET /nodes/nonexistent: %v", err)
-	}
+	resp := authedGet(t, fmt.Sprintf("http://%s/nodes/nonexistent", adminAddr))
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusNotFound {
@@ -280,10 +268,7 @@ func TestAdminPoolsEndpoint(t *testing.T) {
 
 	time.Sleep(1500 * time.Millisecond)
 
-	resp, err := http.Get(fmt.Sprintf("http://%s/pools", adminAddr))
-	if err != nil {
-		t.Fatalf("GET /pools: %v", err)
-	}
+	resp := authedGet(t, fmt.Sprintf("http://%s/pools", adminAddr))
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
@@ -330,6 +315,10 @@ func startStack(t *testing.T, env testEnv) (string, string, func()) {
 		cancel()
 		t.Fatalf("proxy startup timeout")
 	}
+
+	waitCtx, waitCancel := context.WithTimeout(ctx, 5*time.Second)
+	topo.WaitForInitialProbes(waitCtx)
+	waitCancel()
 
 	adm := admin.New(topo, &cfg, zap.NewNop())
 	adminErrCh := make(chan error, 1)
@@ -400,7 +389,11 @@ func stackConfig(t *testing.T, env testEnv) config.Config {
 		},
 	}
 	cfg.ProbeConfig = config.DefaultProbeConfig()
-	cfg.ServerConfig.AdminTokens = config.AdminTokenConfig{}
+	cfg.ServerConfig.AdminTokens = config.AdminTokenConfig{
+		Tokens: map[string]config.AdminTokenEntry{
+			"test-token": {Role: "admin"},
+		},
+	}
 	cfg.Normalize()
 
 	return cfg
@@ -415,6 +408,20 @@ func checkStringField(t *testing.T, m map[string]interface{}, key, want string) 
 	if got != want {
 		t.Fatalf("field %q: got %q, want %q", key, got, want)
 	}
+}
+
+func authedGet(t *testing.T, url string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer test-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	return resp
 }
 
 func readAll(t *testing.T, r io.Reader) []byte {

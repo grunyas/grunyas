@@ -230,7 +230,7 @@ func (c *Config) Validate() error {
 		} else {
 			seenIDs[node.ID] = true
 			for _, r := range node.ID {
-				if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-') {
+				if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' {
 					errs = append(errs, fmt.Sprintf("%s.id must be lowercase URL-safe (a-z0-9-)", prefix))
 					break
 				}

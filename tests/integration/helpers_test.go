@@ -166,6 +166,10 @@ func startProxy(t *testing.T, env testEnv) (addr string, stop func()) {
 		t.Fatalf("timed out waiting for proxy to be ready")
 	}
 
+	waitCtx, waitCancel := context.WithTimeout(ctx, 5*time.Second)
+	topo.WaitForInitialProbes(waitCtx)
+	waitCancel()
+
 	stop = func() {
 		cancel()
 		select {
@@ -231,6 +235,9 @@ func newTestClient(t *testing.T, addr string, env testEnv) *testClient {
 	}
 	if _, ok := msg.(*pgproto3.AuthenticationOk); !ok {
 		_ = conn.Close()
+		if er, ok := msg.(*pgproto3.ErrorResponse); ok {
+			t.Fatalf("expected AuthenticationOk, got ErrorResponse code=%s severity=%s message=%s", er.Code, er.Severity, er.Message)
+		}
 		t.Fatalf("expected AuthenticationOk, got %T", msg)
 	}
 

@@ -454,7 +454,6 @@ func TestPoolsEmptyTopology(t *testing.T) {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
 	var body map[string]interface{}
-	json.Unmarshal(rec.Body.Bytes(), &body)
 	_ = json.Unmarshal(rec.Body.Bytes(), &body)
 	pools, ok := body["pools"].([]interface{})
 	if !ok {
@@ -481,7 +480,7 @@ func TestConfigWithAuth(t *testing.T) {
 		t.Fatalf("expected 200 with auth, got %d", rec.Code)
 	}
 	var body map[string]interface{}
-	json.Unmarshal(rec.Body.Bytes(), &body)
+	_ = json.Unmarshal(rec.Body.Bytes(), &body)
 
 	// Spot-check: top-level keys should match TOML sections.
 	for _, k := range []string{"server", "nodes", "logging", "telemetry", "auth", "probe"} {
