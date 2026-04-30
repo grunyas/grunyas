@@ -95,10 +95,7 @@ func (sess *Session) Run() {
 	}
 
 	if authErr := sess.authenticate(user, password); authErr != nil {
-		code := "28P01"
-		if perr, ok := authErr.(*types.ProxyError); ok {
-			code = perr.Code
-		}
+		code := types.CodeFromErr(authErr, "28P01")
 
 		sess.log.Info("connection setup failed", zap.String("user", user), zap.String("code", code), zap.Error(authErr))
 		if err := sess.CloseWithError("FATAL", code, authErr.Error()); err != nil {
@@ -112,10 +109,7 @@ func (sess *Session) Run() {
 
 	if sess.poolMode == config.PoolModeSession {
 		if err := sess.acquireUpstream(); err != nil {
-			code := "53300"
-			if perr, ok := err.(*types.ProxyError); ok {
-				code = perr.Code
-			}
+			code := types.CodeFromErr(err, "53300")
 			sess.log.Info("connection setup failed", zap.String("user", user), zap.String("code", code), zap.Error(err))
 			if err := sess.CloseWithError("FATAL", code, err.Error()); err != nil {
 				sess.log.Warn("failed to close connection", zap.Error(err))
@@ -217,10 +211,7 @@ func (sess *Session) Run() {
 			}
 
 			if err := sess.acquireUpstream(); err != nil {
-				code := "53300"
-				if perr, ok := err.(*types.ProxyError); ok {
-					code = perr.Code
-				}
+				code := types.CodeFromErr(err, "53300")
 				sess.log.Info("failed to acquire upstream", zap.String("code", code), zap.Error(err))
 				if err := sess.CloseWithError("FATAL", code, err.Error()); err != nil {
 					sess.log.Warn("failed to close connection", zap.Error(err))
@@ -228,7 +219,7 @@ func (sess *Session) Run() {
 				return
 			}
 
-			switchMode, err := messaging.Process(sess.ctx, msg, sess.upstream, sess.log)
+			switchMode, err := messaging.Process(msg, sess.upstream, sess.log)
 			if err != nil {
 				sess.log.Error("error processing message", zap.Error(err))
 				return
@@ -371,10 +362,7 @@ func (sess *Session) acquireUpstream() error {
 	}
 	upstream, err := sess.srv.AcquireUpstream()
 	if err != nil {
-		if perr, ok := err.(*types.ProxyError); ok {
-			return perr
-		}
-		return &types.ProxyError{Code: "53300", Message: "connection pool exhausted, please try again later"}
+		return err
 	}
 
 	upstreamCtx, upstreamCancel := context.WithCancel(sess.ctx)

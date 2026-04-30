@@ -136,7 +136,10 @@ func main() {
 	// M2: Admin server
 	// -----------------------------------------------------------------------
 
-	adminSrv := admin.New(topo, &cfg, logger)
+	adminSrv, err := admin.New(topo, &cfg, logger)
+	if err != nil {
+		logger.Panic("failed to initialize admin server", zap.Error(err))
+	}
 	go func() {
 		if err := adminSrv.Run(ctx); err != nil {
 			logger.Warn("admin server exited", zap.Error(err))
@@ -147,7 +150,10 @@ func main() {
 	// Serve
 	// -----------------------------------------------------------------------
 
-	srv := proxy.Initialize(ctx, &cfg, logger, topo)
+	srv, err := proxy.Initialize(ctx, &cfg, logger, topo)
+	if err != nil {
+		logger.Panic("failed to initialize proxy", zap.Error(err))
+	}
 
 	// Run server in background (since it blocks)
 	go func() {
@@ -164,16 +170,15 @@ func main() {
 
 	logger.Info("shutting down")
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer shutdownCancel()
-
 	if err := adminSrv.Close(); err != nil {
 		logger.Warn("admin shutdown error", zap.Error(err))
 	}
 
-	<-shutdownCtx.Done()
-	if shutdownCtx.Err() == context.DeadlineExceeded {
-		logger.Warn("shutdown deadline exceeded, forcing exit")
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		logger.Warn("shutdown timed out, forcing exit", zap.Error(err))
 	}
 }
 

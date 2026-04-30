@@ -68,7 +68,7 @@ func Initialize(cfg config.AuthConfig, log *zap.Logger) (*Authenticator, error) 
 
 		srv, err := scram.SHA256.NewServer(func(username string) (scram.StoredCredentials, error) {
 			if username != cred.Username {
-				return scram.StoredCredentials{}, fmt.Errorf(scram.ErrUnknownUser)
+				return scram.StoredCredentials{}, errors.New(scram.ErrUnknownUser)
 			}
 
 			return auth.scramCred, nil

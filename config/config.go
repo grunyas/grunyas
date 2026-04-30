@@ -44,7 +44,6 @@ func (c *Config) Normalize() {
 	} else if c.ServerConfig.Admin.ListenAddr == "" {
 		// Fall back to default.
 		c.ServerConfig.Admin.ListenAddr = DefaultAdminConfig().ListenAddr
-		_ = c.ServerConfig.AdminAddr // suppress unused check; kept for deprecation
 	}
 
 	// BackendConfig derivation removed in M1+M2 refactor.
