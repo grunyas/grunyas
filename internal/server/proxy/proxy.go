@@ -48,15 +48,17 @@ type Proxy struct {
 
 	currentConnectionsCount  atomic.Int64
 	lifetimeConnectionsCount atomic.Int64
+
+	sessionsWg  sync.WaitGroup
+	closeLnOnce sync.Once
 }
 
 // Initialize creates a new Proxy instance with the provided context, configuration,
 // logger, and topology. The topology provides per-node pool managers; the proxy
 // acquires upstream connections from topology.PoolFor(primary.ID).
-// It panics if config or logger are nil, or if initialization of sub-components fails.
-func Initialize(ctx context.Context, cfg *config.Config, logger *zap.Logger, topo *topology.Topology) *Proxy {
+func Initialize(ctx context.Context, cfg *config.Config, logger *zap.Logger, topo *topology.Topology) (*Proxy, error) {
 	if cfg == nil {
-		panic("config cannot be nil")
+		return nil, fmt.Errorf("config cannot be nil")
 	}
 
 	if ctx == nil {
@@ -64,12 +66,12 @@ func Initialize(ctx context.Context, cfg *config.Config, logger *zap.Logger, top
 	}
 
 	if logger == nil {
-		panic("logger cannot be nil")
+		return nil, fmt.Errorf("logger cannot be nil")
 	}
 
 	authn, err := auth.Initialize(cfg.Auth, logger)
 	if err != nil {
-		panic(fmt.Errorf("failed to initialize auth: %w", err))
+		return nil, fmt.Errorf("failed to initialize auth: %w", err)
 	}
 
 	idleTimeout := time.Duration(cfg.ServerConfig.ClientIdleTimeout) * time.Second
@@ -79,7 +81,7 @@ func Initialize(ctx context.Context, cfg *config.Config, logger *zap.Logger, top
 	if sslMode == "optional" || sslMode == "mandatory" {
 		cert, err := tls.LoadX509KeyPair(cfg.ServerConfig.SSLCert, cfg.ServerConfig.SSLKey)
 		if err != nil {
-			panic(fmt.Errorf("failed to load key pair: %w", err))
+			return nil, fmt.Errorf("failed to load key pair: %w", err)
 		}
 		tlsConfig = &tls.Config{Certificates: []tls.Certificate{cert}}
 	}
@@ -94,7 +96,7 @@ func Initialize(ctx context.Context, cfg *config.Config, logger *zap.Logger, top
 		idle:      newIdleSweeper(idleTimeout),
 		ready:     make(chan struct{}),
 		tlsConfig: tlsConfig,
-	}
+	}, nil
 }
 
 // Run starts the TCP listener and serves client connections.
@@ -112,9 +114,11 @@ func (prx *Proxy) Run() error {
 
 		prx.logger.Info("shutting down proxy listener")
 
-		if err := ln.Close(); err != nil {
-			prx.logger.Warn("failed to close listener", zap.Error(err))
-		}
+		prx.closeLnOnce.Do(func() {
+			if err := prx.ln.Close(); err != nil {
+				prx.logger.Warn("failed to close listener", zap.Error(err))
+			}
+		})
 	}()
 
 	close(prx.ready)
@@ -136,7 +140,11 @@ func (prx *Proxy) Run() error {
 			continue
 		}
 
-		go prx.handleNewIncomingConnection(clientConn)
+		prx.sessionsWg.Add(1)
+		go func() {
+			defer prx.sessionsWg.Done()
+			prx.handleNewIncomingConnection(clientConn)
+		}()
 	}
 }
 
@@ -210,7 +218,7 @@ func (prx *Proxy) AcquireUpstream() (types.UpstreamClientInterface, error) {
 	}
 	mgr, err := prx.topo.PoolFor(primary.ID)
 	if err != nil {
-		return nil, &types.ProxyError{Code: "57P03", Message: "[grunyas] no primary available"}
+		return nil, &types.ProxyError{Code: "57P03", Message: "[grunyas] no primary available", Cause: err}
 	}
 	return mgr.AcquireDbConnection()
 }
@@ -273,18 +281,16 @@ func (prx *Proxy) handleNewIncomingConnection(conn net.Conn) {
 
 	prx.lifetimeConnectionsCount.Add(1)
 
-	go func() {
-		defer func() {
-			prx.mu.Lock()
-			delete(prx.sessions, sess)
-			prx.mu.Unlock()
+	defer func() {
+		prx.mu.Lock()
+		delete(prx.sessions, sess)
+		prx.mu.Unlock()
 
-			prx.idle.Untrack(sess)
-			prx.subtractCurrentSessionsCount()
-		}()
-
-		sess.Run()
+		prx.idle.Untrack(sess)
+		prx.currentConnectionsCount.Add(-1)
 	}()
+
+	sess.Run()
 }
 
 func (prx *Proxy) idleSweeper() {
@@ -326,6 +332,46 @@ func (prx *Proxy) canAcceptNewConnection() bool {
 	}
 }
 
-func (prx *Proxy) subtractCurrentSessionsCount() {
-	prx.currentConnectionsCount.Add(-1)
+// Shutdown gracefully stops the proxy by closing all active sessions and waiting
+// for them to drain. Returns when all sessions are closed or ctx expires.
+func (prx *Proxy) Shutdown(ctx context.Context) error {
+	// Wait until the listener has been assigned to avoid a data race on prx.ln.
+	select {
+	case <-prx.ready:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	prx.logger.Info("shutting down proxy, draining active sessions")
+
+	// Stop accepting new connections.
+	prx.closeLnOnce.Do(func() {
+		_ = prx.ln.Close()
+	})
+
+	// Snapshot and close all active sessions.
+	prx.mu.Lock()
+	sessions := make([]*session.Session, 0, len(prx.sessions))
+	for s := range prx.sessions {
+		sessions = append(sessions, s)
+	}
+	prx.mu.Unlock()
+
+	for _, s := range sessions {
+		go s.Close()
+	}
+
+	// Wait for all session goroutines to finish or timeout.
+	done := make(chan struct{})
+	go func() {
+		prx.sessionsWg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-done:
+		return nil
+	}
 }

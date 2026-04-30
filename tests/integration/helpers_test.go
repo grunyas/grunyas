@@ -149,7 +149,10 @@ func startProxy(t *testing.T, env testEnv) (addr string, stop func()) {
 		t.Fatalf("failed to build topology: %v", err)
 	}
 	t.Cleanup(topo.Close)
-	prx := proxy.Initialize(ctx, &cfg, zap.NewNop(), topo)
+	prx, err := proxy.Initialize(ctx, &cfg, zap.NewNop(), topo)
+	if err != nil {
+		t.Fatalf("proxy.Initialize: %v", err)
+	}
 
 	errCh := make(chan error, 1)
 	go func() {

@@ -3,6 +3,7 @@ package types
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/grunyas/grunyas/config"
@@ -182,8 +183,25 @@ var (
 type ProxyError struct {
 	Code    string
 	Message string
+	Cause   error
 }
 
 func (e *ProxyError) Error() string {
 	return e.Message
+}
+
+// Unwrap returns the underlying error, enabling errors.Is and errors.As to
+// see through the wrapping.
+func (e *ProxyError) Unwrap() error {
+	return e.Cause
+}
+
+// CodeFromErr extracts the SQLSTATE code from a ProxyError, returning the
+// provided default when the error is not a ProxyError.
+func CodeFromErr(err error, defaultCode string) string {
+	var perr *ProxyError
+	if errors.As(err, &perr) {
+		return perr.Code
+	}
+	return defaultCode
 }

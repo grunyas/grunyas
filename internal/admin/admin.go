@@ -6,11 +6,13 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
 	"runtime/debug"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -42,7 +44,7 @@ type Server struct {
 	closeOnce sync.Once
 }
 
-func New(topo *topology.Topology, cfg *config.Config, log *zap.Logger) *Server {
+func New(topo *topology.Topology, cfg *config.Config, log *zap.Logger) (*Server, error) {
 	s := &Server{
 		topo:        topo,
 		cfg:         cfg,
@@ -63,7 +65,7 @@ func New(topo *topology.Topology, cfg *config.Config, log *zap.Logger) *Server {
 	if ac.TLSEnabled {
 		cert, err := tls.LoadX509KeyPair(ac.TLSCertFile, ac.TLSKeyFile)
 		if err != nil {
-			log.Panic("failed to load admin TLS key pair", zap.Error(err))
+			return nil, fmt.Errorf("failed to load admin TLS key pair: %w", err)
 		}
 		s.tlsConfig = &tls.Config{Certificates: []tls.Certificate{cert}}
 	}
@@ -82,7 +84,7 @@ func New(topo *topology.Topology, cfg *config.Config, log *zap.Logger) *Server {
 	}, []string{"path"})
 	s.metricsReg.MustRegister(s.requestsTotal, s.requestDur)
 
-	return s
+	return s, nil
 }
 
 func (s *Server) Run(ctx context.Context) error {
@@ -149,7 +151,7 @@ func (s *Server) Run(ctx context.Context) error {
 					)
 				}
 			}
-			if err := serveFn(); err != nil && err != http.ErrServerClosed {
+			if err := serveFn(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				s.logger.Warn("metrics listener error", zap.Error(err))
 			}
 		}()
@@ -166,7 +168,7 @@ func (s *Server) Run(ctx context.Context) error {
 	} else {
 		lnErr = s.httpSrv.ListenAndServe()
 	}
-	if lnErr != nil && lnErr != http.ErrServerClosed {
+	if lnErr != nil && !errors.Is(lnErr, http.ErrServerClosed) {
 		return lnErr
 	}
 	return nil
@@ -237,7 +239,7 @@ func (s *Server) requestMetricsMiddleware(next http.Handler) http.Handler {
 		if routePath == "" {
 			routePath = r.URL.Path
 		}
-		s.requestsTotal.WithLabelValues(routePath, r.Method, fmt.Sprintf("%d", ww.status)).Inc()
+		s.requestsTotal.WithLabelValues(routePath, r.Method, strconv.Itoa(ww.status)).Inc()
 		s.requestDur.WithLabelValues(routePath).Observe(dur)
 	})
 }
@@ -339,7 +341,7 @@ func redactConfig(m map[string]interface{}, tokenHashes map[string]string) {
 		for _, n := range nodes {
 			if nodeMap, ok := n.(map[string]interface{}); ok {
 				if conn, ok := nodeMap["connection"].(map[string]interface{}); ok {
-					if pw, ok := conn["password"]; ok && pw != nil && pw.(string) != "" {
+					if pwStr, ok := conn["password"].(string); ok && pwStr != "" {
 						conn["password"] = "***"
 					}
 				}

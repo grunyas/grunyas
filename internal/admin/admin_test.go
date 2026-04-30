@@ -31,7 +31,11 @@ func newTestServer(t *testing.T, topo *topology.Topology, tokens map[string]conf
 		topo = topology.NewEmpty()
 	}
 
-	return New(topo, &cfg, zap.NewNop())
+	s, err := New(topo, &cfg, zap.NewNop())
+	if err != nil {
+		panic(err)
+	}
+	return s
 }
 
 func testRouter(s *Server) *chi.Mux {
@@ -260,7 +264,10 @@ func TestConfigPasswordRedacted(t *testing.T) {
 		},
 	}
 
-	s := New(topology.NewEmpty(), &cfg, zap.NewNop())
+	s, err := New(topology.NewEmpty(), &cfg, zap.NewNop())
+	if err != nil {
+		t.Fatalf("admin.New: %v", err)
+	}
 	rec := httptest.NewRecorder()
 	testRouter(s).ServeHTTP(rec, authedRequest("GET", "/config", "invalid"))
 

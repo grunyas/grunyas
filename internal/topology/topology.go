@@ -205,12 +205,16 @@ func (t *Topology) ClusterID() SystemID {
 
 func (t *Topology) Close() {
 	t.mu.RLock()
-	defer t.mu.RUnlock()
+	nodes := make([]*nodeState, 0, len(t.nodes))
+	for _, ns := range t.nodes {
+		nodes = append(nodes, ns)
+	}
+	t.mu.RUnlock()
 
-	for id, ns := range t.nodes {
+	for _, ns := range nodes {
 		ns.probe.Close()
 		ns.pool.Close()
-		t.logger.Debug("topology node closed", zap.String("node", string(id)))
+		t.logger.Debug("topology node closed", zap.String("node", string(ns.config.ID)))
 	}
 }
 
@@ -267,7 +271,7 @@ func (t *Topology) UpdateLiveness(id string, l probe.Liveness, err error) {
 			t.logger.Info("node became reachable",
 				zap.String("node", id),
 			)
-		} else if ns.liveness != newLiveness {
+		} else {
 			t.logger.Info("node liveness changed",
 				zap.String("node", id),
 				zap.String("from", ns.liveness.String()),

@@ -28,7 +28,6 @@ func (m *mockUpstream) SendSimpleQuery(ctx context.Context, query string) (types
 func TestProcessExtendedProtocolPinning(t *testing.T) {
 	upstream := &mockUpstream{}
 	logger := zap.NewNop()
-	ctx := context.Background()
 
 	tests := []struct {
 		name    string
@@ -65,7 +64,7 @@ func TestProcessExtendedProtocolPinning(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pin, err := Process(ctx, tt.msg, upstream, logger)
+			pin, err := Process(tt.msg, upstream, logger)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
