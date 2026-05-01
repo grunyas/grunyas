@@ -24,6 +24,8 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/grunyas/grunyas/config"
+	"github.com/grunyas/grunyas/internal/decisions"
+	"github.com/grunyas/grunyas/internal/policy"
 	"github.com/grunyas/grunyas/internal/topology"
 )
 
@@ -42,15 +44,45 @@ type Server struct {
 	requestDur    *prometheus.HistogramVec
 
 	closeOnce sync.Once
+
+	decisionsBus *decisions.Bus
+	policyEng    *policy.Engine
+
+	routingMetrics struct {
+		decisionsTotal    func() int64
+		decisionsLeased   func() int64
+		decisionsRejected func() int64
+		publishedTotal    func() int64
+		eligibleReadSize  func() int64
+		eligibleWriteSize func() int64
+	}
 }
 
-func New(topo *topology.Topology, cfg *config.Config, log *zap.Logger) (*Server, error) {
+func (s *Server) SetRoutingMetrics(
+	decisionsTotal func() int64,
+	decisionsLeased func() int64,
+	decisionsRejected func() int64,
+	publishedTotal func() int64,
+	eligibleReadSize func() int64,
+	eligibleWriteSize func() int64,
+) {
+	s.routingMetrics.decisionsTotal = decisionsTotal
+	s.routingMetrics.decisionsLeased = decisionsLeased
+	s.routingMetrics.decisionsRejected = decisionsRejected
+	s.routingMetrics.publishedTotal = publishedTotal
+	s.routingMetrics.eligibleReadSize = eligibleReadSize
+	s.routingMetrics.eligibleWriteSize = eligibleWriteSize
+}
+
+func New(topo *topology.Topology, cfg *config.Config, log *zap.Logger, bus *decisions.Bus, polEng *policy.Engine) (*Server, error) {
 	s := &Server{
-		topo:        topo,
-		cfg:         cfg,
-		logger:      log.With(zap.String("component", "admin")),
-		tokenHashes: make(map[string]string),
-		metricsReg:  prometheus.NewRegistry(),
+		topo:         topo,
+		cfg:          cfg,
+		logger:       log.With(zap.String("component", "admin")),
+		tokenHashes:  make(map[string]string),
+		metricsReg:   prometheus.NewRegistry(),
+		decisionsBus: bus,
+		policyEng:    polEng,
 	}
 
 	for token, entry := range cfg.ServerConfig.AdminTokens.Tokens {
@@ -72,6 +104,8 @@ func New(topo *topology.Topology, cfg *config.Config, log *zap.Logger) (*Server,
 
 	s.metricsReg.MustRegister(newTopologyCollector(topo))
 	s.metricsReg.MustRegister(collectors.NewBuildInfoCollector())
+
+	s.metricsReg.MustRegister(newDecisionCollector(s))
 
 	s.requestsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "grunyas_admin_requests_total",
@@ -99,8 +133,6 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 
 	mux.Group(func(r chi.Router) {
-		// Auth group: /state, /nodes, /pools, /config, /policies.
-		// /metrics is conditionally included when AuthRequired is true.
 		r.Use(s.authMiddleware)
 		if authRequired {
 			r.Get("/metrics", s.handleMetrics)
@@ -112,6 +144,7 @@ func (s *Server) Run(ctx context.Context) error {
 		r.Get("/config", s.handleConfig)
 		r.Get("/policies", s.handlePolicies)
 		r.Get("/policies/{name}", s.handlePolicyByName)
+		r.Get("/decisions", s.handleDecisionsSSE)
 	})
 
 	addr := s.cfg.ServerConfig.Admin.ListenAddr
@@ -284,7 +317,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		},
 		"nodes":       s.nodeViewsToJSON(nodes),
 		"pools":       s.poolViews(),
-		"policies":    []interface{}{},
+		"policies":    s.policyViews(),
 		"observed_at": time.Now().UTC().Format(time.RFC3339Nano),
 	})
 }
@@ -360,13 +393,25 @@ func redactConfig(m map[string]interface{}, tokenHashes map[string]string) {
 
 func (s *Server) handlePolicies(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"policies": []interface{}{},
+		"policies": s.policyViews(),
 	})
 }
 
 func (s *Server) handlePolicyByName(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	if s.policyEng == nil {
+		writeJSONError(w, http.StatusNotFound, "not_found",
+			fmt.Sprintf("policy %q not found", name))
+		return
+	}
+	for _, inst := range s.policyEng.Instances() {
+		if inst.Name == name {
+			writeJSON(w, http.StatusOK, s.policyView(inst))
+			return
+		}
+	}
 	writeJSONError(w, http.StatusNotFound, "not_found",
-		fmt.Sprintf("policy %q not found", chi.URLParam(r, "name")))
+		fmt.Sprintf("policy %q not found", name))
 }
 
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
@@ -377,42 +422,186 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------------------------
+// Decisions SSE endpoint (M3)
+// ---------------------------------------------------------------------------
+
+func (s *Server) handleDecisionsSSE(w http.ResponseWriter, r *http.Request) {
+	if s.decisionsBus == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "decisions bus not configured")
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSONError(w, http.StatusInternalServerError, "internal_error", "response writer does not support flushing")
+		return
+	}
+
+	sub, ok := s.decisionsBus.Subscribe()
+	if !ok {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": "max_subscribers",
+			"limit": s.cfg.ServerConfig.Decisions.MaxSubscribers,
+		})
+		return
+	}
+	defer sub.Unsub()
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	keepAlive := time.NewTicker(15 * time.Second)
+	defer keepAlive.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-keepAlive.C:
+			_, _ = fmt.Fprintf(w, ": keepalive\n\n")
+			flusher.Flush()
+		case msg, ok := <-sub.Ch:
+			if !ok {
+				return
+			}
+			switch v := msg.(type) {
+			case decisions.Event:
+				data, err := json.Marshal(v)
+				if err != nil {
+					s.logger.Error("failed to marshal decision event for SSE", zap.Error(err))
+					continue
+				}
+				_, _ = fmt.Fprintf(w, "event: decision\nid: %s\ndata: %s\n\n", v.EventID, data)
+				flusher.Flush()
+			case policy.Transition:
+				data, err := json.Marshal(v)
+				if err != nil {
+					s.logger.Error("failed to marshal policy transition for SSE", zap.Error(err))
+					continue
+				}
+				_, _ = fmt.Fprintf(w, "event: policy_transition\ndata: %s\n\n", data)
+				flusher.Flush()
+			}
+
+			if drops := sub.DrainDropped(); drops > 0 {
+				de := decisions.DroppedEvent{Count: drops, Since: time.Now().UTC().Format(time.RFC3339Nano)}
+				data, err := json.Marshal(de)
+				if err != nil {
+					s.logger.Error("failed to marshal dropped event for SSE", zap.Error(err))
+				} else {
+					_, _ = fmt.Fprintf(w, "event: dropped\ndata: %s\n\n", data)
+					flusher.Flush()
+				}
+			}
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Policy views (M3)
+// ---------------------------------------------------------------------------
+
+func (s *Server) policyViews() []interface{} {
+	if s.policyEng == nil {
+		return []interface{}{}
+	}
+	instances := s.policyEng.Instances()
+	result := make([]interface{}, 0, len(instances))
+	for _, inst := range instances {
+		result = append(result, s.policyView(inst))
+	}
+	return result
+}
+
+func (s *Server) policyView(inst policy.Instance) map[string]interface{} {
+	candidates := []map[string]interface{}{}
+	states := s.policyEng.CandidateStates(inst.Name)
+	for nodeID, cs := range states {
+		entry := map[string]interface{}{
+			"node_id":           nodeID,
+			"state":             cs.State.String(),
+			"entered_state_at":  cs.EnteredStateAt.UTC().Format(time.RFC3339Nano),
+		}
+		if cs.LastCondition != "" {
+			entry["last_observation_reason"] = cs.LastCondition
+		}
+		candidates = append(candidates, entry)
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i]["node_id"].(string) < candidates[j]["node_id"].(string)
+	})
+
+	return map[string]interface{}{
+		"name":       inst.Name,
+		"template":   inst.Template,
+		"scope":      inst.Scope,
+		"parameters": inst.Parameters,
+		"timing": map[string]int{
+			"dwell_ms":   inst.Timing.DwellMs,
+			"release_ms": inst.Timing.ReleaseMs,
+		},
+		"candidates": candidates,
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 func (s *Server) poolViews() []map[string]interface{} {
-	primary, ok := s.topo.Primary()
-	if !ok {
-		return []map[string]interface{}{}
-	}
+	result := make([]map[string]interface{}, 0)
+	nodes := s.topo.Nodes()
 
-	mgr, err := s.topo.PoolFor(primary.ID)
-	if err != nil {
-		return []map[string]interface{}{}
-	}
-	stats := mgr.PoolStats()
+	for portID := range s.cfg.ServerConfig.Ports {
+		portCfg := s.cfg.ServerConfig.Ports[portID]
+		poolMode := portCfg.PoolMode
+		if poolMode == "" {
+			poolMode = "session"
+		}
 
-	// Look up the node's pool config for min_conns.
-	minConns := 0
-	for _, nc := range s.cfg.Nodes {
-		if nc.ID == string(primary.ID) {
-			minConns = nc.Pool.MinConns
-			break
+		for _, nv := range nodes {
+			mgr, err := s.topo.PoolFor(nv.ID)
+			if err != nil {
+				continue
+			}
+			stats := mgr.PoolStats()
+
+			minConns := 0
+			for _, nc := range s.cfg.Nodes {
+				if nc.ID == string(nv.ID) {
+					minConns = nc.Pool.MinConns
+					break
+				}
+			}
+
+			result = append(result, map[string]interface{}{
+				"port":           portID,
+				"node_id":        string(nv.ID),
+				"mode":           poolMode,
+				"total_conns":    stats.TotalConns,
+				"acquired_conns": stats.AcquiredConns,
+				"idle_conns":     stats.IdleConns,
+				"max_conns":      stats.MaxConns,
+				"min_conns":      minConns,
+			})
 		}
 	}
 
-	return []map[string]interface{}{
-		{
-			"port":           "write",
-			"node_id":        string(primary.ID),
-			"mode":           string(s.cfg.ServerConfig.GetWritePoolMode()),
-			"total_conns":    stats.TotalConns,
-			"acquired_conns": stats.AcquiredConns,
-			"idle_conns":     stats.IdleConns,
-			"max_conns":      stats.MaxConns,
-			"min_conns":      minConns,
-		},
-	}
+	sort.Slice(result, func(i, j int) bool {
+		pi := result[i]["port"].(string)
+		pj := result[j]["port"].(string)
+		if pi != pj {
+			return pi < pj
+		}
+		return result[i]["node_id"].(string) < result[j]["node_id"].(string)
+	})
+
+	return result
 }
 
 func (s *Server) nodeViewToJSON(nv topology.NodeView) map[string]interface{} {
@@ -599,5 +788,83 @@ func (c *topologyCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	for l, count := range byLive {
 		ch <- prometheus.MustNewConstMetric(nodesByLiveDesc, prometheus.GaugeValue, count, l)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// M3: Decision + Policy + Bus Prometheus collector
+// ---------------------------------------------------------------------------
+
+type decisionCollector struct {
+	srv *Server
+}
+
+func newDecisionCollector(srv *Server) *decisionCollector {
+	return &decisionCollector{srv: srv}
+}
+
+var (
+	decTotalDesc         = prometheus.NewDesc("grunyas_routing_decisions_total", "Total routing decisions.", []string{"port", "outcome", "reason"}, nil)
+	decEligSetSizeDesc   = prometheus.NewDesc("grunyas_routing_eligible_set_size", "Eligible set size.", []string{"port"}, nil)
+	decDurDesc           = prometheus.NewDesc("grunyas_routing_decision_duration_seconds", "Decision duration seconds.", []string{"port"}, nil)
+	policyStateDesc      = prometheus.NewDesc("grunyas_policy_state", "Policy state per candidate.", []string{"policy", "scope", "node_id", "state"}, nil)
+	policyTransDesc      = prometheus.NewDesc("grunyas_policy_transitions_total", "Policy transition count.", []string{"policy", "scope", "node_id", "from", "to"}, nil)
+	subsGaugeDesc        = prometheus.NewDesc("grunyas_decisions_subscribers", "Active SSE subscribers.", nil, nil)
+	subsPublishedDesc    = prometheus.NewDesc("grunyas_decisions_published_total", "Published decision events.", nil, nil)
+	subsDroppedDesc      = prometheus.NewDesc("grunyas_decisions_dropped_total", "Dropped decision events.", []string{"reason"}, nil)
+)
+
+func (c *decisionCollector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- decTotalDesc
+	ch <- decEligSetSizeDesc
+	ch <- decDurDesc
+	ch <- policyStateDesc
+	ch <- policyTransDesc
+	ch <- subsGaugeDesc
+	ch <- subsPublishedDesc
+	ch <- subsDroppedDesc
+}
+
+func (c *decisionCollector) Collect(ch chan<- prometheus.Metric) {
+	s := c.srv
+
+	// Routing decisions
+	rm := s.routingMetrics
+	if rm.decisionsTotal != nil {
+		total := float64(rm.decisionsTotal())
+		ch <- prometheus.MustNewConstMetric(decTotalDesc, prometheus.CounterValue, total, "all", "all", "all")
+
+		if rm.decisionsLeased != nil {
+			ch <- prometheus.MustNewConstMetric(decTotalDesc, prometheus.CounterValue, float64(rm.decisionsLeased()), "all", "leased", "")
+		}
+		if rm.decisionsRejected != nil {
+			ch <- prometheus.MustNewConstMetric(decTotalDesc, prometheus.CounterValue, float64(rm.decisionsRejected()), "all", "rejected", "")
+		}
+	}
+	if rm.eligibleReadSize != nil {
+		ch <- prometheus.MustNewConstMetric(decEligSetSizeDesc, prometheus.GaugeValue, float64(rm.eligibleReadSize()), "read")
+	}
+	if rm.eligibleWriteSize != nil {
+		ch <- prometheus.MustNewConstMetric(decEligSetSizeDesc, prometheus.GaugeValue, float64(rm.eligibleWriteSize()), "write")
+	}
+
+	// Policy states
+	if s.policyEng != nil {
+		for _, inst := range s.policyEng.Instances() {
+			for nodeID, cs := range s.policyEng.CandidateStates(inst.Name) {
+				ch <- prometheus.MustNewConstMetric(policyStateDesc, prometheus.GaugeValue, 1, inst.Name, inst.Scope, nodeID, cs.State.String())
+			}
+		}
+	}
+
+	// Bus metrics
+	if s.decisionsBus != nil {
+		ch <- prometheus.MustNewConstMetric(subsGaugeDesc, prometheus.GaugeValue, float64(s.decisionsBus.SubscriberCount()))
+		if rm.publishedTotal != nil {
+			ch <- prometheus.MustNewConstMetric(subsPublishedDesc, prometheus.CounterValue, float64(rm.publishedTotal()))
+		}
+		ch <- prometheus.MustNewConstMetric(subsDroppedDesc, prometheus.CounterValue, float64(s.decisionsBus.DroppedOTelOverflow()), "otel_overflow")
+		ch <- prometheus.MustNewConstMetric(subsDroppedDesc, prometheus.CounterValue, float64(s.decisionsBus.DroppedSubOverflow()), "subscriber_overflow")
+		ch <- prometheus.MustNewConstMetric(subsDroppedDesc, prometheus.CounterValue, float64(s.decisionsBus.DroppedBusOverflow()), "bus_overflow")
 	}
 }

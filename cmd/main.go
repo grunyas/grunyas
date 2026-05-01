@@ -18,7 +18,10 @@ import (
 	"github.com/grunyas/grunyas/config"
 	"github.com/grunyas/grunyas/internal/admin"
 	"github.com/grunyas/grunyas/internal/console"
-	"github.com/grunyas/grunyas/internal/logger"
+	"github.com/grunyas/grunyas/internal/decisions"
+	logpkg "github.com/grunyas/grunyas/internal/logger"
+	"github.com/grunyas/grunyas/internal/policy"
+	"github.com/grunyas/grunyas/internal/routing"
 	"github.com/grunyas/grunyas/internal/server/proxy"
 	"github.com/grunyas/grunyas/internal/topology"
 	"github.com/spf13/viper"
@@ -58,22 +61,22 @@ func main() {
 
 	ctx := withSignalContext()
 
-	var logCh *logger.LoggerChannel
-	var logWriter io.Writer // Use io.Writer to properly pass nil
+	var logCh *logpkg.LoggerChannel
+	var logWriter io.Writer
 	if !*noConsole {
-		logCh = logger.NewLoggerChannel()
+		logCh = logpkg.NewLoggerChannel()
 		logWriter = logCh
 	}
 
-	logger, cleanup, err := logger.Initialize(ctx, cfg.Logging, cfg.Telemetry, logWriter)
+	logger, cleanup, err := logpkg.Initialize(ctx, cfg.Logging, cfg.Telemetry, logWriter)
 	if err != nil {
 		panic(fmt.Errorf("failed to initialize logging/telemetry: %w", err))
 	}
 	defer cleanup(context.Background()) //nolint:errcheck
 
 	if addr := cfg.ServerConfig.PprofAddr; addr != "" {
-		runtime.SetBlockProfileRate(1)     // record every block event
-		runtime.SetMutexProfileFraction(1) // record every mutex contention event
+		runtime.SetBlockProfileRate(1)
+		runtime.SetMutexProfileFraction(1)
 		go func() {
 			logger.Info("pprof server listening", zap.String("addr", addr))
 			if err := http.ListenAndServe(addr, nil); err != nil {
@@ -83,7 +86,7 @@ func main() {
 	}
 
 	// -----------------------------------------------------------------------
-	// M1 startup flow (§5 of architecture/M1.md)
+	// M1 startup flow
 	// -----------------------------------------------------------------------
 
 	topo, err := topology.New(ctx, &cfg, logger)
@@ -126,20 +129,81 @@ func main() {
 		}
 	}
 
-	for portID := range cfg.ServerConfig.Ports {
-		if portID != "write" {
-			logger.Warn(fmt.Sprintf("port %q declared but not yet implemented in this version; ignored", portID))
+	// -----------------------------------------------------------------------
+	// M3: Policy engine
+	// -----------------------------------------------------------------------
+
+	templates := policy.NewTemplateSet()
+	policyInstances := make([]policy.Instance, 0, len(cfg.Policies))
+	for _, pc := range cfg.Policies {
+		params := make(map[string]int)
+		for k, v := range pc.Parameters {
+			switch vv := v.(type) {
+			case float64:
+				params[k] = int(vv)
+			case int:
+				params[k] = vv
+			}
 		}
+		policyInstances = append(policyInstances, policy.Instance{
+			Name:       pc.Name,
+			Template:   pc.Template,
+			Scope:      pc.Scope,
+			Parameters: params,
+			Timing: policy.TemplateTiming{
+				DwellMs:   pc.Timing.DwellMs,
+				ReleaseMs: pc.Timing.ReleaseMs,
+			},
+		})
 	}
+
+	// -----------------------------------------------------------------------
+	// M3: Decisions bus
+	// -----------------------------------------------------------------------
+
+	decisionsBus := decisions.NewBus(
+		cfg.ServerConfig.Decisions.MaxSubscribers,
+		cfg.ServerConfig.Decisions.PerSubscriberBuffer,
+	)
+
+	// -----------------------------------------------------------------------
+	// M3: Policy engine (creation after bus, since bus is its notification channel)
+	// -----------------------------------------------------------------------
+
+	policyEng := policy.NewEngine(policyInstances, templates, decisionsBus, logger)
+
+	// -----------------------------------------------------------------------
+	// M3: Routing pipeline
+	// -----------------------------------------------------------------------
+
+	routingPipeline := routing.NewPipeline(topo, policyEng, decisionsBus, logger)
+
+	// Start observation-driven policy evaluation on the probe cadence.
+	routingPipeline.StartObservationLoop(ctx, cfg.ProbeConfig.IntervalMs)
+
+	// -----------------------------------------------------------------------
+	// M3: OTel decision-log exporter (subscribes to bus, logs structured events)
+	// -----------------------------------------------------------------------
+
+	logpkg.StartDecisionExporter(ctx, decisionsBus, logger)
 
 	// -----------------------------------------------------------------------
 	// M2: Admin server
 	// -----------------------------------------------------------------------
 
-	adminSrv, err := admin.New(topo, &cfg, logger)
+	adminSrv, err := admin.New(topo, &cfg, logger, decisionsBus, policyEng)
 	if err != nil {
 		logger.Panic("failed to initialize admin server", zap.Error(err))
 	}
+
+	adminSrv.SetRoutingMetrics(
+		routingPipeline.DecisionsTotal.Load,
+		routingPipeline.DecisionsLeased.Load,
+		routingPipeline.DecisionsRejected.Load,
+		routingPipeline.PublishedTotal.Load,
+		routingPipeline.EligibleSetRead.Load,
+		routingPipeline.EligibleSetWrite.Load,
+	)
 	go func() {
 		if err := adminSrv.Run(ctx); err != nil {
 			logger.Warn("admin server exited", zap.Error(err))
@@ -147,28 +211,45 @@ func main() {
 	}()
 
 	// -----------------------------------------------------------------------
-	// Serve
+	// M3: Start port listeners
 	// -----------------------------------------------------------------------
 
-	srv, err := proxy.Initialize(ctx, &cfg, logger, topo)
-	if err != nil {
-		logger.Panic("failed to initialize proxy", zap.Error(err))
+	var proxies []*proxy.Proxy
+
+	for portID := range cfg.ServerConfig.Ports {
+		portLogger := logger.With(zap.String("port", portID))
+		srv, err := proxy.Initialize(ctx, &cfg, portLogger, topo, routingPipeline, portID)
+		if err != nil {
+			logger.Panic("failed to initialize proxy", zap.String("port", portID), zap.Error(err))
+		}
+		proxies = append(proxies, srv)
+
+		go func(p *proxy.Proxy) {
+			if err := p.Run(); err != nil {
+				logger.Panic("server error", zap.String("port", p.Port()), zap.Error(err))
+			}
+		}(srv)
 	}
 
-	// Run server in background (since it blocks)
-	go func() {
-		if err := srv.Run(); err != nil {
-			logger.Panic("server error", zap.Error(err))
-		}
-	}()
+	logger.Info("M3 startup complete",
+		zap.Int("ports", len(proxies)),
+		zap.Int("nodes", len(topo.Nodes())),
+		zap.Int("policies", len(policyEng.Instances())),
+	)
 
 	if *noConsole {
 		<-ctx.Done()
 	} else {
-		console.Start(ctx, srv, logCh.Channel)
+		if len(proxies) > 0 {
+			console.Start(ctx, proxies[0], logCh.Channel)
+		} else {
+			console.Start(ctx, nil, logCh.Channel)
+		}
 	}
 
 	logger.Info("shutting down")
+
+	decisionsBus.Close()
 
 	if err := adminSrv.Close(); err != nil {
 		logger.Warn("admin shutdown error", zap.Error(err))
@@ -177,13 +258,14 @@ func main() {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		logger.Warn("shutdown timed out, forcing exit", zap.Error(err))
+	for _, p := range proxies {
+		if err := p.Shutdown(shutdownCtx); err != nil {
+			logger.Warn("shutdown timed out, forcing exit", zap.String("port", p.Port()), zap.Error(err))
+		}
 	}
 }
 
 func bindEnvKeys() {
-	// Bind server config (non-port fields)
 	serverKeys := []string{
 		"server.admin.listen_addr",
 		"server.admin.tls_enabled",
@@ -202,16 +284,24 @@ func bindEnvKeys() {
 		"server.pprof_addr",
 	}
 
-	// Bind write port config
 	portKeys := []string{
 		"server.ports.write.listen_addr",
 		"server.ports.write.pool_mode",
 		"server.ports.write.ssl_mode",
 		"server.ports.write.ssl_cert",
 		"server.ports.write.ssl_key",
+		"server.ports.read.listen_addr",
+		"server.ports.read.pool_mode",
+		"server.ports.read.ssl_mode",
+		"server.ports.read.ssl_cert",
+		"server.ports.read.ssl_key",
+		"server.ports.compat.listen_addr",
+		"server.ports.compat.pool_mode",
+		"server.ports.compat.ssl_mode",
+		"server.ports.compat.ssl_cert",
+		"server.ports.compat.ssl_key",
 	}
 
-	// Bind probe config
 	probeKeys := []string{
 		"probe.interval_ms",
 		"probe.liveness_failure_count",
@@ -220,7 +310,6 @@ func bindEnvKeys() {
 		"probe.lag_max_age_ms",
 	}
 
-	// Bind logging, telemetry, auth
 	otherKeys := []string{
 		"logging.level",
 		"logging.development",
@@ -239,20 +328,13 @@ func bindEnvKeys() {
 		}
 	}
 
-	// Bind indexed node configs. Env-var override is capped at envNodeMax
-	// nodes (i.e. GRUNYAS_NODES_0_* through GRUNYAS_NODES_{envNodeMax-1}_*).
-	// Nodes declared beyond this cap in TOML still load; only env override
-	// stops working past the cap. Documented in config.toml.example.
 	for i := 0; i < envNodeMax; i++ {
 		bindNodeEnvVars(i)
 	}
 }
 
-// envNodeMax caps how many node indices accept env-var overrides.
-// Nodes declared in TOML are unaffected.
 const envNodeMax = 10
 
-// bindNodeEnvVars binds environment variables for a single node at the given index.
 func bindNodeEnvVars(index int) {
 	prefix := fmt.Sprintf("nodes.%d", index)
 

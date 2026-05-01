@@ -15,6 +15,7 @@ type Config struct {
 	Logging      LoggingConfig   `mapstructure:"logging" json:"logging"`
 	Telemetry    TelemetryConfig `mapstructure:"telemetry" json:"telemetry"`
 	Auth         AuthConfig      `mapstructure:"auth" json:"auth"`
+	Policies     []PolicyConfig  `mapstructure:"policies" json:"policies"`
 }
 
 // PrimaryNode returns a pointer to the node with declared_role="primary".
@@ -35,6 +36,13 @@ func (c *Config) Normalize() {
 		c.ServerConfig.SSLCert = write.SSLCert
 		c.ServerConfig.SSLKey = write.SSLKey
 		c.ServerConfig.PoolMode = c.ServerConfig.GetWritePoolMode()
+	}
+
+	if c.ServerConfig.Decisions.MaxSubscribers == 0 {
+		c.ServerConfig.Decisions.MaxSubscribers = 64
+	}
+	if c.ServerConfig.Decisions.PerSubscriberBuffer == 0 {
+		c.ServerConfig.Decisions.PerSubscriberBuffer = 256
 	}
 
 	// M1→M2 admin config migration: populate Admin.ListenAddr from the
@@ -315,6 +323,49 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	// Validate policies
+	seenPolicyNames := make(map[string]bool)
+	for i, pol := range c.Policies {
+		prefix := fmt.Sprintf("policies[%d]", i)
+		if pol.Name == "" {
+			errs = append(errs, fmt.Sprintf("%s.name is required", prefix))
+		} else if seenPolicyNames[pol.Name] {
+			errs = append(errs, fmt.Sprintf("%s.name '%s' is duplicate", prefix, pol.Name))
+		} else {
+			seenPolicyNames[pol.Name] = true
+		}
+		switch pol.Template {
+		case "health-filter", "lag-filter", "pool-saturation-rejection":
+		case "":
+			errs = append(errs, fmt.Sprintf("%s.template is required", prefix))
+		default:
+			errs = append(errs, fmt.Sprintf("%s.template must be one of: health-filter, lag-filter, pool-saturation-rejection", prefix))
+		}
+		switch pol.Scope {
+		case "cluster", "":
+		default:
+			if !isValidNodeScope(pol.Scope) {
+				errs = append(errs, fmt.Sprintf("%s.scope must be 'cluster' or 'node:<id>'", prefix))
+			}
+		}
+		if pol.Timing.DwellMs < 0 {
+			errs = append(errs, fmt.Sprintf("%s.timing.dwell_ms must be >= 0", prefix))
+		}
+		if pol.Timing.ReleaseMs < 0 {
+			errs = append(errs, fmt.Sprintf("%s.timing.release_ms must be >= 0", prefix))
+		}
+		if pol.Timing.DwellMs > 0 && pol.Timing.DwellMs < c.ProbeConfig.IntervalMs {
+			errs = append(errs, fmt.Sprintf("%s.timing.dwell_ms must be >= probe.interval_ms (%d)", prefix, c.ProbeConfig.IntervalMs))
+		}
+	}
+
+	// Validate compat port can't use session mode (M3)
+	if compat, ok := c.ServerConfig.Ports["compat"]; ok {
+		if strings.ToLower(compat.PoolMode) == "session" {
+			errs = append(errs, "server.ports.compat.pool_mode cannot be 'session'")
+		}
+	}
+
 	if len(errs) > 0 {
 		return fmt.Errorf("config validation failed: %s", strings.Join(errs, "; "))
 	}
@@ -330,4 +381,8 @@ func validateHostPort(field, value string) error {
 		return fmt.Errorf("%s must be formatted as host:port: %v", field, err)
 	}
 	return nil
+}
+
+func isValidNodeScope(scope string) bool {
+	return len(scope) > 5 && scope[:5] == "node:"
 }

@@ -301,7 +301,7 @@ func startStack(t *testing.T, env testEnv) (string, string, func()) {
 		t.Fatalf("topology.New: %v", err)
 	}
 
-	prx, err := proxy.Initialize(ctx, &cfg, zap.NewNop(), topo)
+	prx, err := proxy.Initialize(ctx, &cfg, zap.NewNop(), topo, nil, "write")
 	if err != nil {
 		t.Fatalf("proxy.Initialize: %v", err)
 	}
@@ -323,7 +323,7 @@ func startStack(t *testing.T, env testEnv) (string, string, func()) {
 	topo.WaitForInitialProbes(waitCtx)
 	waitCancel()
 
-	adm, err := admin.New(topo, &cfg, zap.NewNop())
+	adm, err := admin.New(topo, &cfg, zap.NewNop(), nil, nil)
 	if err != nil {
 		t.Fatalf("admin.New: %v", err)
 	}

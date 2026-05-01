@@ -159,3 +159,55 @@ func init() {
 	// Suppress unused import lint — the os import is available for golden-file mode.
 	_ = os.ReadFile
 }
+
+func TestRingBufferOverflowCounter(t *testing.T) {
+	bus := NewBus(10, 10)
+	defer bus.Close()
+
+	// Fill ring to capacity (1024) + 5 more → 5 overwrites
+	for i := 0; i < ringCapacity+5; i++ {
+		bus.Publish(Event{Port: "write", PoolMode: "session", Source: "client"})
+	}
+
+	if bus.DroppedBusOverflow() != 5 {
+		t.Fatalf("expected 5 bus overflows after %d publishes, got %d", ringCapacity+5, bus.DroppedBusOverflow())
+	}
+
+	// Another publish → another overwrite
+	bus.Publish(Event{Port: "write", PoolMode: "session", Source: "client"})
+	if bus.DroppedBusOverflow() != 6 {
+		t.Fatalf("expected 6 after one more, got %d", bus.DroppedBusOverflow())
+	}
+}
+
+func TestRingBufferOverflowOnSecondWrap(t *testing.T) {
+	bus := NewBus(10, 10)
+	defer bus.Close()
+
+	// First wrap: ringCapacity writes
+	for i := 0; i < ringCapacity; i++ {
+		bus.Publish(Event{Port: "write", PoolMode: "session", Source: "client"})
+	}
+	if bus.DroppedBusOverflow() != 0 {
+		t.Fatalf("expected 0 before first wrap, got %d", bus.DroppedBusOverflow())
+	}
+
+	// Second wrap: ringCapacity more writes → every one overwrites
+	for i := 0; i < ringCapacity; i++ {
+		bus.Publish(Event{Port: "write", PoolMode: "session", Source: "client"})
+	}
+	if bus.DroppedBusOverflow() != ringCapacity {
+		t.Fatalf("expected %d after second wrap, got %d", ringCapacity, bus.DroppedBusOverflow())
+	}
+}
+
+func TestMarkOTelDroppedTakesCount(t *testing.T) {
+	bus := NewBus(10, 10)
+	defer bus.Close()
+
+	bus.MarkOTelDropped(50)
+	bus.MarkOTelDropped(7)
+	if bus.DroppedOTelOverflow() != 57 {
+		t.Fatalf("expected 57, got %d", bus.DroppedOTelOverflow())
+	}
+}

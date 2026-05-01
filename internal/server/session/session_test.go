@@ -81,6 +81,13 @@ func (m *mockProxyServer) AcquireUpstream() (types.UpstreamClientInterface, erro
 	return m.upstream, nil
 }
 
+func (m *mockProxyServer) Port() string {
+	return "write"
+}
+
+func (m *mockProxyServer) PublishDecisionEvent(event interface{}) {
+}
+
 type mockUpstream struct {
 	txStatus    byte
 	releaseFunc func()
@@ -699,6 +706,14 @@ func TestSessionTransactionPoolingAcquireReleasePerQuery(t *testing.T) {
 
 	cfg := config.Default()
 	cfg.ServerConfig.PoolMode = config.PoolModeTransaction
+	if cfg.ServerConfig.Ports == nil {
+		cfg.ServerConfig.Ports = make(map[string]config.PortConfig)
+	}
+	cfg.ServerConfig.Ports["write"] = config.PortConfig{
+		ListenAddr: "127.0.0.1:5711",
+		PoolMode:   "transaction",
+		SSLMode:    "never",
+	}
 
 	var acquireCount atomic.Int32
 	var releaseCount atomic.Int32
@@ -770,6 +785,14 @@ func TestSessionTransactionPoolingSwitchesToSessionOnSessionState(t *testing.T) 
 
 	cfg := config.Default()
 	cfg.ServerConfig.PoolMode = config.PoolModeTransaction
+	if cfg.ServerConfig.Ports == nil {
+		cfg.ServerConfig.Ports = make(map[string]config.PortConfig)
+	}
+	cfg.ServerConfig.Ports["write"] = config.PortConfig{
+		ListenAddr: "127.0.0.1:5711",
+		PoolMode:   "transaction",
+		SSLMode:    "never",
+	}
 
 	var releaseCount atomic.Int32
 
@@ -822,6 +845,14 @@ func TestSessionTransactionPoolingAcquireFailureSendsFatal(t *testing.T) {
 
 	cfg := config.Default()
 	cfg.ServerConfig.PoolMode = config.PoolModeTransaction
+	if cfg.ServerConfig.Ports == nil {
+		cfg.ServerConfig.Ports = make(map[string]config.PortConfig)
+	}
+	cfg.ServerConfig.Ports["write"] = config.PortConfig{
+		ListenAddr: "127.0.0.1:5711",
+		PoolMode:   "transaction",
+		SSLMode:    "never",
+	}
 
 	_, clientConn, done, cleanup, _ := startSessionWithConfig(t, parentCtx, cfg, nil, func() (types.UpstreamClientInterface, error) {
 		return nil, types.ErrPoolExhausted

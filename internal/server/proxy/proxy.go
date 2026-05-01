@@ -19,6 +19,8 @@ import (
 
 	"github.com/grunyas/grunyas/config"
 	"github.com/grunyas/grunyas/internal/auth"
+	"github.com/grunyas/grunyas/internal/decisions"
+	"github.com/grunyas/grunyas/internal/routing"
 	"github.com/grunyas/grunyas/internal/server/downstream_client"
 	"github.com/grunyas/grunyas/internal/server/session"
 	"github.com/grunyas/grunyas/internal/server/types"
@@ -51,12 +53,16 @@ type Proxy struct {
 
 	sessionsWg  sync.WaitGroup
 	closeLnOnce sync.Once
+
+	port            string
+	routingPipeline *routing.Pipeline
+	decisionsBus    *decisions.Bus
 }
 
 // Initialize creates a new Proxy instance with the provided context, configuration,
-// logger, and topology. The topology provides per-node pool managers; the proxy
-// acquires upstream connections from topology.PoolFor(primary.ID).
-func Initialize(ctx context.Context, cfg *config.Config, logger *zap.Logger, topo *topology.Topology) (*Proxy, error) {
+// logger, topology, and routing pipeline. The portID determines which listen port
+// this proxy serves ("write", "read", or "compat").
+func Initialize(ctx context.Context, cfg *config.Config, logger *zap.Logger, topo *topology.Topology, routingPipeline *routing.Pipeline, portID string) (*Proxy, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config cannot be nil")
 	}
@@ -77,33 +83,54 @@ func Initialize(ctx context.Context, cfg *config.Config, logger *zap.Logger, top
 	idleTimeout := time.Duration(cfg.ServerConfig.ClientIdleTimeout) * time.Second
 
 	var tlsConfig *tls.Config
-	sslMode := strings.ToLower(cfg.ServerConfig.SSLMode)
-	if sslMode == "optional" || sslMode == "mandatory" {
-		cert, err := tls.LoadX509KeyPair(cfg.ServerConfig.SSLCert, cfg.ServerConfig.SSLKey)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load key pair: %w", err)
+	portCfg, portExists := cfg.ServerConfig.Ports[portID]
+	if portExists {
+		sslMode := strings.ToLower(portCfg.SSLMode)
+		if sslMode == "optional" || sslMode == "mandatory" {
+			cert, err := tls.LoadX509KeyPair(portCfg.SSLCert, portCfg.SSLKey)
+			if err != nil {
+				return nil, fmt.Errorf("failed to load key pair for port %s: %w", portID, err)
+			}
+			tlsConfig = &tls.Config{Certificates: []tls.Certificate{cert}}
 		}
-		tlsConfig = &tls.Config{Certificates: []tls.Certificate{cert}}
+	}
+
+	var bus *decisions.Bus
+	if routingPipeline != nil {
+		bus = routingPipeline.Bus()
 	}
 
 	return &Proxy{
-		cfg:       cfg,
-		ctx:       ctx,
-		logger:    logger,
-		auth:      authn,
-		topo:      topo,
-		sessions:  make(map[*session.Session]struct{}),
-		idle:      newIdleSweeper(idleTimeout),
-		ready:     make(chan struct{}),
-		tlsConfig: tlsConfig,
+		cfg:             cfg,
+		ctx:             ctx,
+		logger:          logger,
+		auth:            authn,
+		topo:            topo,
+		sessions:        make(map[*session.Session]struct{}),
+		idle:            newIdleSweeper(idleTimeout),
+		ready:           make(chan struct{}),
+		tlsConfig:       tlsConfig,
+		port:            portID,
+		routingPipeline: routingPipeline,
+		decisionsBus:    bus,
 	}, nil
+}
+
+// Port returns the listen port identifier this proxy serves on.
+func (prx *Proxy) Port() string {
+	return prx.port
 }
 
 // Run starts the TCP listener and serves client connections.
 // It runs until the context is canceled or a fatal error occurs during listener startup.
 // It also starts the idle connection sweeper background task.
 func (prx *Proxy) Run() error {
-	ln, err := net.Listen("tcp", prx.cfg.ServerConfig.ListenAddr)
+	listenAddr, err := prx.listenAddr()
+	if err != nil {
+		return err
+	}
+
+	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return err
 	}
@@ -112,7 +139,7 @@ func (prx *Proxy) Run() error {
 	go func() {
 		<-prx.ctx.Done()
 
-		prx.logger.Info("shutting down proxy listener")
+		prx.logger.Info("shutting down proxy listener", zap.String("port", prx.port))
 
 		prx.closeLnOnce.Do(func() {
 			if err := prx.ln.Close(); err != nil {
@@ -122,16 +149,16 @@ func (prx *Proxy) Run() error {
 	}()
 
 	close(prx.ready)
-	prx.logger.Info("proxy listening", zap.String("addr", ln.Addr().String()))
+	prx.logger.Info("proxy listening", zap.String("port", prx.port), zap.String("addr", ln.Addr().String()))
 
 	go prx.idleSweeper()
 
 	for {
 		clientConn, err := ln.Accept()
-		prx.logger.Debug("new client connection")
+		prx.logger.Debug("new client connection", zap.String("port", prx.port))
 
 		if err != nil {
-			if prx.ctx.Err() != nil { // context is closed
+			if prx.ctx.Err() != nil {
 				return nil
 			}
 
@@ -146,6 +173,14 @@ func (prx *Proxy) Run() error {
 			prx.handleNewIncomingConnection(clientConn)
 		}()
 	}
+}
+
+func (prx *Proxy) listenAddr() (string, error) {
+	portCfg, ok := prx.cfg.ServerConfig.Ports[prx.port]
+	if !ok {
+		return "", fmt.Errorf("no config for port %q", prx.port)
+	}
+	return portCfg.ListenAddr, nil
 }
 
 // GetContext returns the base context of the proxy.
@@ -206,21 +241,72 @@ func (prx *Proxy) NewSCRAMSession() (types.SCRAMSession, error) {
 	return prx.auth.NewSCRAMSession()
 }
 
-// AcquireUpstream acquires a connection from the primary node's pool.
-// Returns 57P03 when no primary is observed (M1 §6).
+// PublishDecisionEvent emits a decision event to the bus.
+// If the proxy does not have a decisions bus, it is a no-op.
+func (prx *Proxy) PublishDecisionEvent(event interface{}) {
+	if prx.decisionsBus == nil {
+		return
+	}
+	switch e := event.(type) {
+	case decisions.Event:
+		prx.decisionsBus.Publish(e)
+	}
+}
+
+// AcquireUpstream acquires a connection using the routing pipeline.
+// The routing pipeline evaluates all candidates, applies policies,
+// and returns a connection to the chosen node along with a decision event.
 func (prx *Proxy) AcquireUpstream() (types.UpstreamClientInterface, error) {
-	if prx.topo == nil {
-		return nil, &types.ProxyError{Code: "57P03", Message: "[grunyas] no primary available"}
+	if prx.routingPipeline == nil {
+		// Fallback for tests: use old direct-primary path
+		if prx.topo == nil {
+			return nil, &types.ProxyError{Code: "57P03", Message: "[grunyas] no primary available"}
+		}
+		primary, ok := prx.topo.Primary()
+		if !ok {
+			return nil, &types.ProxyError{Code: "57P03", Message: "[grunyas] no primary available"}
+		}
+		mgr, err := prx.topo.PoolFor(primary.ID)
+		if err != nil {
+			return nil, &types.ProxyError{Code: "57P03", Message: "[grunyas] no primary available", Cause: err}
+		}
+		return mgr.AcquireDbConnection()
 	}
-	primary, ok := prx.topo.Primary()
-	if !ok {
-		return nil, &types.ProxyError{Code: "57P03", Message: "[grunyas] no primary available"}
+
+	poolMode := prx.poolMode()
+	req := routing.LeaseRequest{
+		Port:     prx.port,
+		PoolMode: poolMode,
 	}
-	mgr, err := prx.topo.PoolFor(primary.ID)
+	switch prx.port {
+	case "write":
+		req.LeaseType = string(poolMode)
+	case "read":
+		if poolMode == "session" {
+			req.LeaseType = "session"
+		} else {
+			req.LeaseType = "transaction"
+		}
+	case "compat":
+		req.LeaseType = "transaction"
+	}
+
+	result, err := prx.routingPipeline.Lease(req)
 	if err != nil {
-		return nil, &types.ProxyError{Code: "57P03", Message: "[grunyas] no primary available", Cause: err}
+		return nil, err
 	}
-	return mgr.AcquireDbConnection()
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	return result.Upstream, nil
+}
+
+func (prx *Proxy) poolMode() string {
+	portCfg, ok := prx.cfg.ServerConfig.Ports[prx.port]
+	if !ok {
+		return "session"
+	}
+	return portCfg.PoolMode
 }
 
 // Ready returns a channel that is closed when the proxy is successfully listening
@@ -230,10 +316,10 @@ func (prx *Proxy) Ready() <-chan struct{} {
 }
 
 func (prx *Proxy) handleNewIncomingConnection(conn net.Conn) {
-	requiredSSL := strings.ToLower(prx.cfg.ServerConfig.SSLMode) == "mandatory"
+	portCfg, portExists := prx.cfg.ServerConfig.Ports[prx.port]
+	requiredSSL := portExists && strings.ToLower(portCfg.SSLMode) == "mandatory"
 	downstream := downstream_client.Initialize(conn, prx.tlsConfig, requiredSSL, prx.logger)
 
-	// Configure keep-alives
 	if tc, ok := conn.(*net.TCPConn); ok {
 		if err := tc.SetKeepAliveConfig(net.KeepAliveConfig{
 			Enable:   true,
@@ -254,14 +340,11 @@ func (prx *Proxy) handleNewIncomingConnection(conn net.Conn) {
 	if !prx.canAcceptNewConnection() {
 		if err := downstream.Send(&pgproto3.ErrorResponse{
 			Severity: "FATAL",
-			Code:     "53300", // too_many_connections
+			Code:     "53300",
 			Message:  "connection pool exhausted, please try again later",
 		}); err != nil {
 			prx.logger.Warn("failed to buffer error response", zap.Error(err))
 		}
-		// Flush synchronously so the client sees the error before we drop
-		// the socket. Without this, Send just writes to the internal buffer
-		// and Close() would discard it.
 		if err := downstream.Flush(); err != nil {
 			prx.logger.Warn("failed to flush error response", zap.Error(err))
 		}
@@ -270,7 +353,21 @@ func (prx *Proxy) handleNewIncomingConnection(conn net.Conn) {
 		return
 	}
 
-	prx.logger.Debug("initializing new session", zap.String("remote", downstream.RemoteAddr().String()))
+	// M3: compat port stub - reject all connections before session starts
+	if prx.port == "compat" {
+		if err := downstream.Send(&pgproto3.ErrorResponse{
+			Severity: "FATAL",
+			Code:     "0A000",
+			Message:  "[grunyas] compat port classification not yet implemented (M4)",
+		}); err != nil {
+			prx.logger.Warn("failed to buffer compat-port error", zap.Error(err))
+		}
+		downstream.Flush() //nolint:errcheck
+		downstream.Close() //nolint:errcheck
+		return
+	}
+
+	prx.logger.Debug("initializing new session", zap.String("remote", downstream.RemoteAddr().String()), zap.String("port", prx.port))
 	sess := session.Initialize(prx, downstream)
 
 	prx.idle.Track(sess)
@@ -335,21 +432,18 @@ func (prx *Proxy) canAcceptNewConnection() bool {
 // Shutdown gracefully stops the proxy by closing all active sessions and waiting
 // for them to drain. Returns when all sessions are closed or ctx expires.
 func (prx *Proxy) Shutdown(ctx context.Context) error {
-	// Wait until the listener has been assigned to avoid a data race on prx.ln.
 	select {
 	case <-prx.ready:
 	case <-ctx.Done():
 		return ctx.Err()
 	}
 
-	prx.logger.Info("shutting down proxy, draining active sessions")
+	prx.logger.Info("shutting down proxy, draining active sessions", zap.String("port", prx.port))
 
-	// Stop accepting new connections.
 	prx.closeLnOnce.Do(func() {
 		_ = prx.ln.Close()
 	})
 
-	// Snapshot and close all active sessions.
 	prx.mu.Lock()
 	sessions := make([]*session.Session, 0, len(prx.sessions))
 	for s := range prx.sessions {
@@ -361,7 +455,6 @@ func (prx *Proxy) Shutdown(ctx context.Context) error {
 		go s.Close()
 	}
 
-	// Wait for all session goroutines to finish or timeout.
 	done := make(chan struct{})
 	go func() {
 		prx.sessionsWg.Wait()
