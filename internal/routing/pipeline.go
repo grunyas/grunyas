@@ -32,7 +32,6 @@ type Pipeline struct {
 	topo        *topology.Topology
 	policyEng   *policy.Engine
 	decisionsBus *decisions.Bus
-	classifier  *classifier.PortClassifier
 	logger      *zap.Logger
 
 	readRR atomic.Uint64
@@ -132,9 +131,10 @@ func (p *Pipeline) Lease(req LeaseRequest) (*LeaseResult, error) {
 		}
 		result.Error = &types.ProxyError{Code: code, Message: msg}
 		event.Outcome = decisions.Outcome{Kind: "rejected", SQLState: code, Reason: reason}
-		if req.Port == "read" {
+		switch req.Port {
+		case "read":
 			event.Consistency = &decisions.Consistency{Mode: "bounded_staleness"}
-		} else if req.Port == "write" {
+		case "write":
 			event.Consistency = &decisions.Consistency{Mode: "linearizable"}
 		}
 		p.DecisionsRejected.Add(1)
@@ -183,9 +183,10 @@ func (p *Pipeline) Lease(req LeaseRequest) (*LeaseResult, error) {
 
 	result.Upstream = upstream
 
-	if req.Port == "read" {
+	switch req.Port {
+	case "read":
 		event.Consistency = &decisions.Consistency{Mode: "bounded_staleness"}
-	} else if req.Port == "write" {
+	case "write":
 		event.Consistency = &decisions.Consistency{Mode: "linearizable"}
 	}
 

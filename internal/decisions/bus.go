@@ -147,13 +147,14 @@ func (b *Bus) Subscribe() (*Subscription, bool) {
 	b.subscribers[id] = s
 
 	// Seed new subscriber with a snapshot of the ring for initial context.
+drainLoop:
 	for _, e := range b.drainRing() {
 		select {
 		case s.ch <- e:
 		default:
 			s.drops.Add(1)
 			b.droppedSubOverflow.Add(1)
-			break
+			break drainLoop
 		}
 	}
 

@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"sort"
 	"sync"
 	"time"
 
@@ -300,6 +301,9 @@ func (e *Engine) Instances() []Instance {
 	for _, inst := range e.instances {
 		result = append(result, *inst)
 	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Name < result[j].Name
+	})
 	return result
 }
 

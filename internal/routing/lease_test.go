@@ -52,7 +52,7 @@ func TestLeaseCompatPortStub(t *testing.T) {
 func TestLeaseDecisionsTotalIncremented(t *testing.T) {
 	p := NewPipeline(nil, nil, nil, zap.NewNop())
 	before := p.DecisionsTotal.Load()
-	p.Lease(LeaseRequest{Port: "compat", PoolMode: "transaction", LeaseType: "transaction"})
+	_, _ = p.Lease(LeaseRequest{Port: "compat", PoolMode: "transaction", LeaseType: "transaction"})
 	if p.DecisionsTotal.Load() != before+1 {
 		t.Fatalf("expected DecisionsTotal to increment, before=%d after=%d", before, p.DecisionsTotal.Load())
 	}
@@ -187,7 +187,7 @@ func TestPipelineHysteresisPendingEligible(t *testing.T) {
 	templates := policy.NewTemplateSet()
 	instances := []policy.Instance{
 		{
-			Name:     "test-lag",
+			Name:     "default-lag-filter",
 			Template: policy.TemplateLagFilter,
 			Scope:    "cluster",
 			Parameters: map[string]int{"threshold_ms": 50},
