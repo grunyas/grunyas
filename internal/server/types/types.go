@@ -55,6 +55,13 @@ type ProxyInterface interface {
 
 	// AcquireUpstream obtains a connection from the pool.
 	AcquireUpstream() (UpstreamClientInterface, error)
+
+	// Port returns the listen port identifier this proxy serves on ("write", "read", "compat").
+	Port() string
+
+	// PublishDecisionEvent emits a decision event to the bus.
+	// If the proxy does not have a decisions bus, it is a no-op.
+	PublishDecisionEvent(event interface{})
 }
 
 // PoolStats represents the current statistics of the database connection pool.

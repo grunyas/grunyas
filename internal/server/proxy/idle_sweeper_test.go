@@ -189,3 +189,10 @@ func (m *mockProxyServer) NewSCRAMSession() (types.SCRAMSession, error) {
 func (m *mockProxyServer) AcquireUpstream() (types.UpstreamClientInterface, error) {
 	return &mockUpstream{}, nil
 }
+
+func (m *mockProxyServer) Port() string {
+	return "write"
+}
+
+func (m *mockProxyServer) PublishDecisionEvent(event interface{}) {
+}

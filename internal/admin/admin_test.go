@@ -6,15 +6,18 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"go.uber.org/zap"
 
 	"github.com/grunyas/grunyas/config"
+	"github.com/grunyas/grunyas/internal/decisions"
+	"github.com/grunyas/grunyas/internal/policy"
 	"github.com/grunyas/grunyas/internal/topology"
-	"go.uber.org/zap"
 )
 
 func newTestServer(t *testing.T, topo *topology.Topology, tokens map[string]config.AdminTokenEntry) *Server {
@@ -31,7 +34,7 @@ func newTestServer(t *testing.T, topo *topology.Topology, tokens map[string]conf
 		topo = topology.NewEmpty()
 	}
 
-	s, err := New(topo, &cfg, zap.NewNop())
+	s, err := New(topo, &cfg, zap.NewNop(), nil, nil)
 	if err != nil {
 		panic(err)
 	}
@@ -52,6 +55,7 @@ func testRouter(s *Server) *chi.Mux {
 		r.Get("/config", s.handleConfig)
 		r.Get("/policies", s.handlePolicies)
 		r.Get("/policies/{name}", s.handlePolicyByName)
+		r.Get("/decisions", s.handleDecisionsSSE)
 	})
 	return mux
 }
@@ -264,7 +268,7 @@ func TestConfigPasswordRedacted(t *testing.T) {
 		},
 	}
 
-	s, err := New(topology.NewEmpty(), &cfg, zap.NewNop())
+	s, err := New(topology.NewEmpty(), &cfg, zap.NewNop(), nil, nil)
 	if err != nil {
 		t.Fatalf("admin.New: %v", err)
 	}
@@ -504,3 +508,189 @@ func ExampleServer_healthz() {
 
 // suppress unused import lint
 var _ = context.Background
+
+// ---------------------------------------------------------------------------
+// M3: SSE endpoint tests
+// ---------------------------------------------------------------------------
+
+func TestSSENoBusReturns503(t *testing.T) {
+	s := newTestServer(t, nil, map[string]config.AdminTokenEntry{"t": {Role: "admin"}})
+	req := httptest.NewRequest("GET", "/decisions", nil)
+	req.Header.Set("Authorization", "Bearer t")
+	rec := httptest.NewRecorder()
+	testRouter(s).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", rec.Code)
+	}
+}
+
+func TestSSEMaxSubscribersRejectsWith503(t *testing.T) {
+	bus := decisions.NewBus(1, 1)
+	policyEng := policy.NewEngine(nil, policy.NewTemplateSet(), bus, nil)
+	cfg := config.Default()
+	cfg.ServerConfig.Admin = config.AdminConfig{
+		ListenAddr: "127.0.0.1:0",
+		Metrics:    config.DefaultAdminConfig().Metrics,
+	}
+	cfg.ServerConfig.AdminTokens = config.AdminTokenConfig{Tokens: map[string]config.AdminTokenEntry{"t": {Role: "admin"}}}
+	cfg.ServerConfig.Decisions = config.DecisionsConfig{MaxSubscribers: 1, PerSubscriberBuffer: 1}
+
+	s, err := New(nil, &cfg, zap.NewNop(), bus, policyEng)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer bus.Close()
+
+	mux := chi.NewMux()
+	mux.Use(s.authMiddleware)
+	mux.Get("/decisions", s.handleDecisionsSSE)
+
+	// First subscriber occupies the slot
+	_, ok := bus.Subscribe()
+	if !ok {
+		t.Fatal("failed to occupy subscriber slot")
+	}
+
+	req := httptest.NewRequest("GET", "/decisions", nil)
+	req.Header.Set("Authorization", "Bearer t")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 at max subscribers, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "max_subscribers") {
+		t.Fatalf("expected max_subscribers in body, got %s", body)
+	}
+	if !strings.Contains(body, `"limit":1`) {
+		t.Fatalf("expected limit:1 in body, got %s", body)
+	}
+}
+
+func TestSSEBackpressureDroppedFrame(t *testing.T) {
+	bus := decisions.NewBus(10, 1)
+	defer bus.Close()
+	policyEng := policy.NewEngine(nil, policy.NewTemplateSet(), bus, nil)
+	cfg := config.Default()
+	cfg.ServerConfig.Admin = config.AdminConfig{
+		ListenAddr: "127.0.0.1:0",
+		Metrics:    config.DefaultAdminConfig().Metrics,
+	}
+	cfg.ServerConfig.AdminTokens = config.AdminTokenConfig{Tokens: map[string]config.AdminTokenEntry{"t": {Role: "admin"}}}
+	cfg.ServerConfig.Decisions = config.DecisionsConfig{MaxSubscribers: 10, PerSubscriberBuffer: 1}
+
+	_, err := New(nil, &cfg, zap.NewNop(), bus, policyEng)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	sub, ok := bus.Subscribe()
+	if !ok {
+		t.Fatal("failed to subscribe")
+	}
+
+	// Fill buffer (size 1) then overflow
+	bus.Publish(decisions.Event{Port: "write", PoolMode: "session", Source: "client"})
+	bus.Publish(decisions.Event{Port: "write", PoolMode: "session", Source: "client"})
+	// Drain the first event
+	<-sub.Ch
+	// Drain drops
+	drops := sub.DrainDropped()
+	if drops != 1 {
+		t.Fatalf("expected 1 drop after overflow, got %d", drops)
+	}
+	sub.Unsub()
+}
+
+func TestSSEDroppedMetricCounters(t *testing.T) {
+	bus := decisions.NewBus(10, 1)
+	defer bus.Close()
+
+	// Pre-populate subscriber buffer
+	sub, ok := bus.Subscribe()
+	if !ok {
+		t.Fatal("failed to subscribe")
+	}
+	defer sub.Unsub()
+
+	bus.Publish(decisions.Event{Port: "write", PoolMode: "session", Source: "client"})
+	// Overflow
+	bus.Publish(decisions.Event{Port: "write", PoolMode: "session", Source: "client"})
+	sub.DrainDropped()
+
+	if bus.DroppedSubOverflow() != 1 {
+		t.Fatalf("expected DroppedSubOverflow=1, got %d", bus.DroppedSubOverflow())
+	}
+}
+
+func TestDecisionEventFieldMapping(t *testing.T) {
+	// Leased events: the outcome_kind is "leased"
+	event := decisions.Event{
+		Port:     "write",
+		PoolMode: "session",
+		Outcome:  decisions.Outcome{Kind: "leased"},
+	}
+	if event.Outcome.Kind != "leased" {
+		t.Fatalf("expected leased kind, got %s", event.Outcome.Kind)
+	}
+
+	// Rejected events: the outcome_kind is "rejected"
+	event2 := decisions.Event{
+		Port:     "read",
+		PoolMode: "transaction",
+		Outcome:  decisions.Outcome{Kind: "rejected", Reason: "read_port:write_attempted", SQLState: "25006"},
+	}
+	if event2.Outcome.Kind != "rejected" {
+		t.Fatalf("expected rejected kind, got %s", event2.Outcome.Kind)
+	}
+	if event2.Outcome.Reason != "read_port:write_attempted" {
+		t.Fatalf("expected read_port:write_attempted reason, got %s", event2.Outcome.Reason)
+	}
+	if event2.Outcome.SQLState != "25006" {
+		t.Fatalf("expected 25006 SQLState, got %s", event2.Outcome.SQLState)
+	}
+}
+
+// TestSSEStreaming verifies the SSE endpoint sets proper headers and content type.
+func TestSSEStreamingHeaders(t *testing.T) {
+	bus := decisions.NewBus(10, 10)
+	defer bus.Close()
+	policyEng := policy.NewEngine(nil, policy.NewTemplateSet(), bus, zap.NewNop())
+	cfg := config.Default()
+	cfg.ServerConfig.Admin = config.AdminConfig{
+		ListenAddr: "127.0.0.1:0",
+		Metrics:    config.DefaultAdminConfig().Metrics,
+	}
+	cfg.ServerConfig.AdminTokens = config.AdminTokenConfig{Tokens: map[string]config.AdminTokenEntry{"t": {Role: "admin"}}}
+
+	s, err := New(nil, &cfg, zap.NewNop(), bus, policyEng)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Directly invoke the handler
+	req := httptest.NewRequest("GET", "/decisions", nil)
+	req.Header.Set("Authorization", "Bearer t")
+	rec := httptest.NewRecorder()
+
+	// The SSE handler blocks until the request context cancels, so we
+	// cancel the context after a short delay to verify the headers.
+	ctx, cancel := context.WithCancel(req.Context())
+	req = req.WithContext(ctx)
+	defer cancel()
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	s.handleDecisionsSSE(rec, req)
+
+	ct := rec.Header().Get("Content-Type")
+	if !strings.Contains(ct, "text/event-stream") {
+		t.Fatalf("expected text/event-stream, got %s", ct)
+	}
+}
+

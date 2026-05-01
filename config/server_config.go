@@ -33,6 +33,9 @@ type ServerConfig struct {
 	// AdminTokens holds bearer tokens for admin API authentication (M2+).
 	AdminTokens AdminTokenConfig `mapstructure:"admin_tokens" json:"admin_tokens"`
 
+	// Decisions holds SSE streaming configuration for the decisions endpoint (M3).
+	Decisions DecisionsConfig `mapstructure:"decisions" json:"decisions"`
+
 	// --- Deprecated fields (M1 compatibility) -----------------------------
 	// AdminAddr is the legacy flat admin_addr (M1). It populates Admin.ListenAddr
 	// during Normalize() if Admin.ListenAddr is empty. Accepted with a
@@ -85,5 +88,19 @@ func PoolModeFromString(s string) (PoolMode, bool) {
 		return PoolModeTransaction, true
 	default:
 		return "", false
+	}
+}
+
+// DecisionsConfig holds SSE streaming configuration for the decisions endpoint.
+type DecisionsConfig struct {
+	MaxSubscribers       int `mapstructure:"max_subscribers" json:"max_subscribers"`
+	PerSubscriberBuffer  int `mapstructure:"per_subscriber_buffer" json:"per_subscriber_buffer"`
+}
+
+// DefaultDecisionsConfig returns sensible defaults for decisions streaming.
+func DefaultDecisionsConfig() DecisionsConfig {
+	return DecisionsConfig{
+		MaxSubscribers:      64,
+		PerSubscriberBuffer: 256,
 	}
 }
