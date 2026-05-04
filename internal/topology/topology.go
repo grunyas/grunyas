@@ -79,8 +79,21 @@ func New(ctx context.Context, cfg *config.Config, log *zap.Logger) (*Topology, e
 			DiscardAll: true,
 		}, log)
 		if err != nil {
+			t.Close()
 			return nil, fmt.Errorf("node %s pool: %w", nc.ID, err)
 		}
+
+		state := &nodeState{
+			config:              nc,
+			pool:                pm,
+			observedRole:        RoleUnknown,
+			liveness:            LivenessUnknown,
+			replicationLagState: LagStateNotApplicable,
+		}
+
+		t.mu.Lock()
+		t.nodes[id] = state
+		t.mu.Unlock()
 
 		prb, err := probe.New(ctx, probe.NodeSpec{
 			ID:         string(id),
@@ -89,23 +102,15 @@ func New(ctx context.Context, cfg *config.Config, log *zap.Logger) (*Topology, e
 			Connection: nc.Connection,
 		}, t, probeConfig(cfg.ProbeConfig), log)
 		if err != nil {
-			pm.Close()
-			for _, prevState := range t.nodes {
-				prevState.probe.Close()
-				prevState.pool.Close()
-			}
+			state.pool.Close()
+			t.mu.Lock()
+			delete(t.nodes, id)
+			t.mu.Unlock()
+			t.Close()
 			return nil, fmt.Errorf("node %s probe: %w", nc.ID, err)
 		}
 
-		state := &nodeState{
-			config:              nc,
-			pool:                pm,
-			probe:               prb,
-			observedRole:        RoleUnknown,
-			liveness:            LivenessUnknown,
-			replicationLagState: LagStateNotApplicable,
-		}
-		t.nodes[id] = state
+		state.probe = prb
 	}
 
 	return t, nil
@@ -216,7 +221,9 @@ func (t *Topology) Close() {
 	t.mu.RUnlock()
 
 	for _, ns := range nodes {
-		ns.probe.Close()
+		if ns.probe != nil {
+			ns.probe.Close()
+		}
 		ns.pool.Close()
 		t.logger.Debug("topology node closed", zap.String("node", string(ns.config.ID)))
 	}
