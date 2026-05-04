@@ -236,7 +236,7 @@ func TestLagUnknown(t *testing.T) {
 	ns := newNodeState("replica", RoleReplica, LivenessUp, false)
 
 	topo := newTestTopology(t, map[NodeID]*nodeState{"n1": ns}, 5000)
-	topo.MarkLagUnknown("n1", nil)
+	topo.MarkLagUnknown("n1", nil, time.Now())
 
 	nv := topo.nodeView("n1", ns)
 	if nv.ReplicationLagState != LagStateUnknown {
@@ -287,8 +287,11 @@ func TestLagStaleAfterMaxAge(t *testing.T) {
 	if nv.ReplicationLagState != LagStateStale {
 		t.Fatalf("expected LagStateStale after max age, got %v", nv.ReplicationLagState)
 	}
-	if nv.ReplicationLagMs != nil {
-		t.Fatalf("expected nil LagMs for stale, got %d", *nv.ReplicationLagMs)
+	if nv.ReplicationLagMs == nil {
+		t.Fatalf("expected non-nil LagMs for stale (last known value), got nil")
+	}
+	if *nv.ReplicationLagMs != 10 {
+		t.Fatalf("expected LagMs=10 for stale, got %d", *nv.ReplicationLagMs)
 	}
 }
 

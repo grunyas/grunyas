@@ -317,9 +317,12 @@ func (c *Config) Validate() error {
 	}
 
 	// Validate admin tokens
-	for token := range c.ServerConfig.AdminTokens.Tokens {
+	for token, entry := range c.ServerConfig.AdminTokens.Tokens {
 		if token == "" {
 			errs = append(errs, "server.admin_tokens.tokens: token must not be empty")
+		}
+		if entry.Role != "" && entry.Role != "admin" {
+			errs = append(errs, fmt.Sprintf("server.admin_tokens.tokens: role must be \"admin\", got %q", entry.Role))
 		}
 	}
 

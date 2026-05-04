@@ -79,6 +79,7 @@ func New(ctx context.Context, cfg *config.Config, log *zap.Logger) (*Topology, e
 			DiscardAll: true,
 		}, log)
 		if err != nil {
+			t.Close()
 			return nil, fmt.Errorf("node %s pool: %w", nc.ID, err)
 		}
 
@@ -89,7 +90,10 @@ func New(ctx context.Context, cfg *config.Config, log *zap.Logger) (*Topology, e
 			liveness:            LivenessUnknown,
 			replicationLagState: LagStateNotApplicable,
 		}
+
+		t.mu.Lock()
 		t.nodes[id] = state
+		t.mu.Unlock()
 
 		prb, err := probe.New(ctx, probe.NodeSpec{
 			ID:         string(id),
@@ -98,9 +102,14 @@ func New(ctx context.Context, cfg *config.Config, log *zap.Logger) (*Topology, e
 			Connection: nc.Connection,
 		}, t, probeConfig(cfg.ProbeConfig), log)
 		if err != nil {
-			pm.Close()
+			state.pool.Close()
+			t.mu.Lock()
+			delete(t.nodes, id)
+			t.mu.Unlock()
+			t.Close()
 			return nil, fmt.Errorf("node %s probe: %w", nc.ID, err)
 		}
+
 		state.probe = prb
 	}
 
@@ -212,7 +221,9 @@ func (t *Topology) Close() {
 	t.mu.RUnlock()
 
 	for _, ns := range nodes {
-		ns.probe.Close()
+		if ns.probe != nil {
+			ns.probe.Close()
+		}
 		ns.pool.Close()
 		t.logger.Debug("topology node closed", zap.String("node", string(ns.config.ID)))
 	}
@@ -356,17 +367,6 @@ func (t *Topology) UpdateSystemID(id string, sid string) error {
 		return err
 	}
 
-	if ns.systemID != "" && ns.systemID != SystemID(sid) {
-		err := fmt.Errorf("system_identifier changed for node %s: was %s, now %s",
-			id, string(ns.systemID), sid)
-		ns.permanentlyDown = true
-		ns.liveness = LivenessDown
-		t.logger.Error("system_identifier changed — node permanently excluded",
-			zap.String("node", id),
-			zap.Error(err))
-		return err
-	}
-
 	ns.systemID = SystemID(sid)
 	return nil
 }
@@ -407,7 +407,7 @@ func (t *Topology) MarkLagIdle(id string, sampledAt time.Time) {
 	ns.lastLagSampleAt = sampledAt
 }
 
-func (t *Topology) MarkLagUnknown(id string, reason error) {
+func (t *Topology) MarkLagUnknown(id string, reason error, sampledAt time.Time) {
 	nid := NodeID(id)
 	t.mu.RLock()
 	ns, ok := t.nodes[nid]
@@ -421,7 +421,7 @@ func (t *Topology) MarkLagUnknown(id string, reason error) {
 
 	ns.replicationLagMs = nil
 	ns.replicationLagState = LagStateUnknown
-	ns.lastLagSampleAt = time.Now()
+	ns.lastLagSampleAt = sampledAt
 	if reason != nil {
 		t.logger.Debug("replication lag unknown", zap.String("node", id), zap.Error(reason))
 	}
@@ -456,7 +456,6 @@ func (t *Topology) nodeView(id NodeID, ns *nodeState) NodeView {
 	lagState := ns.replicationLagState
 	if lagState == LagStateFresh && !ns.lastLagSampleAt.IsZero() &&
 		now.Sub(ns.lastLagSampleAt).Milliseconds() > int64(t.replicationLagMaxAgeMs) {
-		lagMs = nil
 		lagState = LagStateStale
 	}
 
@@ -492,6 +491,10 @@ func roleFromString(s string) (Role, bool) {
 	}
 }
 
+// WaitForInitialProbes blocks until every node has completed at least one probe
+// cycle. If the provided context has no deadline and a node's probe never
+// produces a result, this will hang forever — callers should supply a
+// context with a suitable timeout.
 func (t *Topology) WaitForInitialProbes(ctx context.Context) {
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()

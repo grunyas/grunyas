@@ -4,8 +4,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/grunyas/grunyas/internal/policy"
 )
 
 const ringCapacity = 1024
@@ -100,27 +98,6 @@ func (b *Bus) Publish(event Event) {
 	}
 }
 
-func (b *Bus) PublishTransition(t policy.Transition) {
-	b.mu.Lock()
-	if b.closed {
-		b.mu.Unlock()
-		return
-	}
-	b.writeRing(t)
-	b.mu.Unlock()
-
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-
-	for _, s := range b.subscribers {
-		select {
-		case s.ch <- t:
-		default:
-			s.drops.Add(1)
-			b.droppedSubOverflow.Add(1)
-		}
-	}
-}
 
 type Subscription struct {
 	Ch           <-chan interface{}

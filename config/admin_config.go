@@ -38,7 +38,7 @@ func DefaultAdminConfig() AdminConfig {
 
 // AdminTokenConfig holds the admin bearer tokens loaded from TOML.
 type AdminTokenConfig struct {
-	Tokens map[string]AdminTokenEntry `mapstructure:"tokens" json:"tokens"`
+	Tokens map[string]AdminTokenEntry `mapstructure:"tokens" json:"tokens" sensitive:"count"`
 }
 
 type AdminTokenEntry struct {

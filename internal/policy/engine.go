@@ -73,16 +73,11 @@ type templateSet struct {
 	lag    Evaluator
 }
 
-type notificationBus interface {
-	PublishTransition(t Transition)
-}
-
 type Engine struct {
 	mu sync.RWMutex
 
 	instances map[string]*Instance
 	templates *templateSet
-	bus       notificationBus
 	logger    *zap.Logger
 
 	states map[string]map[string]*perNodeState
@@ -95,16 +90,15 @@ type perNodeState struct {
 	lastCondition string
 }
 
-func NewEngine(instances []Instance, templates *templateSet, bus notificationBus, log *zap.Logger) *Engine {
+func NewEngine(instances []Instance, templates *templateSet, log *zap.Logger) *Engine {
 	if log == nil {
 		log = zap.NewNop()
 	}
 	e := &Engine{
 		instances: make(map[string]*Instance),
 		templates: templates,
-		bus:       bus,
-		logger:    log.With(zap.String("component", "policy")),
 		states:    make(map[string]map[string]*perNodeState),
+		logger:    log.With(zap.String("component", "policy")),
 		now:       time.Now,
 	}
 	for i := range instances {
@@ -239,18 +233,6 @@ func (e *Engine) transition(policyName string, inst *Instance, nodeID string, re
 		pns.state = newState
 		if newState == StatePending || newState == StateActive || newState == StateReleasing {
 			pns.enteredAt = now
-		}
-		if e.bus != nil {
-			e.bus.PublishTransition(Transition{
-				PolicyName:  policyName,
-				Template:    inst.Template,
-				Scope:       inst.Scope,
-				NodeID:      nodeID,
-				From:        oldState,
-				To:          newState,
-				Timestamp:   now,
-				Observation: nv,
-			})
 		}
 	}
 }

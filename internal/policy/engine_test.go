@@ -9,7 +9,7 @@ import (
 
 func newTestEngine(instances []Instance) *Engine {
 	templates := NewTemplateSet()
-	return NewEngine(instances, templates, nil, nil)
+	return NewEngine(instances, templates, nil)
 }
 
 func TestHysteresisCleanToActive(t *testing.T) {

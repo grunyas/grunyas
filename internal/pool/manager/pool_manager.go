@@ -34,11 +34,12 @@ type NodeSpec struct {
 }
 
 type PoolManager struct {
-	ctx context.Context
+	ctx        context.Context
 
-	logger     *zap.Logger
-	pool       *pgxpool.Pool
-	discardAll bool // true only in session mode
+	logger              *zap.Logger
+	pool                *pgxpool.Pool
+	discardAll          bool
+	acquireTimeoutSecs  int
 }
 
 // New creates a pool manager for a single node from a NodeSpec.
@@ -66,16 +67,21 @@ func New(ctx context.Context, spec NodeSpec, log *zap.Logger) (*PoolManager, err
 	}
 
 	return &PoolManager{
-		ctx:        ctx,
-		logger:     log,
-		pool:       pool,
-		discardAll: spec.DiscardAll,
+		ctx:                ctx,
+		logger:             log,
+		pool:               pool,
+		discardAll:         spec.DiscardAll,
+		acquireTimeoutSecs: spec.Pool.AcquireTimeoutSeconds,
 	}, nil
 }
 
 // AcquireDbConnection acquires a connection from the database pool.
 func (pm *PoolManager) AcquireDbConnection() (types.UpstreamClientInterface, error) {
-	acquireCtx, cancel := context.WithTimeout(pm.ctx, 10*time.Second) // TODO: make this configurable
+	timeout := time.Duration(pm.acquireTimeoutSecs) * time.Second
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	acquireCtx, cancel := context.WithTimeout(pm.ctx, timeout)
 	defer cancel()
 
 	sessionClient, err := pm.pool.Acquire(acquireCtx)
