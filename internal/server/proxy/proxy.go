@@ -277,6 +277,7 @@ func (prx *Proxy) AcquireUpstream() (types.UpstreamClientInterface, error) {
 	req := routing.LeaseRequest{
 		Port:     prx.port,
 		PoolMode: poolMode,
+		PoolSaturated: prx.buildPoolSaturatedMap(),
 	}
 	switch prx.port {
 	case "write":
@@ -307,6 +308,23 @@ func (prx *Proxy) poolMode() string {
 		return "session"
 	}
 	return portCfg.PoolMode
+}
+
+func (prx *Proxy) buildPoolSaturatedMap() map[topology.NodeID]bool {
+	if prx.topo == nil {
+		return nil
+	}
+	nodes := prx.topo.Nodes()
+	saturated := make(map[topology.NodeID]bool, len(nodes))
+	for _, nv := range nodes {
+		mgr, err := prx.topo.PoolFor(nv.ID)
+		if err != nil {
+			continue
+		}
+		stats := mgr.PoolStats()
+		saturated[nv.ID] = stats.AcquiredConns >= stats.MaxConns && stats.MaxConns > 0
+	}
+	return saturated
 }
 
 // Ready returns a channel that is closed when the proxy is successfully listening

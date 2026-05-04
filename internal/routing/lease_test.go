@@ -136,7 +136,7 @@ func TestSelectNodeWriteFallback(t *testing.T) {
 	// deterministic lowest-NodeID pick as a safety net.
 	p := NewPipeline(topology.NewEmpty(), nil, nil, zap.NewNop())
 	eligible := []topology.NodeID{"beta", "alpha"}
-	chosen := p.selectNode(eligible, "write")
+	chosen := p.selectNode(eligible, "write", topology.NodeView{}, false)
 	if chosen != "alpha" {
 		t.Fatalf("expected alpha (lowest), got %s", chosen)
 	}
@@ -147,7 +147,7 @@ func TestSelectNodeReadRoundRobin(t *testing.T) {
 	eligible := []topology.NodeID{"r1", "r2", "r3", "r4"}
 	seen := map[topology.NodeID]int{}
 	for i := 0; i < 40; i++ {
-		chosen := p.selectNode(eligible, "read")
+		chosen := p.selectNode(eligible, "read", topology.NodeView{}, false)
 		seen[chosen]++
 	}
 	for _, id := range eligible {
@@ -194,7 +194,7 @@ func TestPipelineHysteresisPendingEligible(t *testing.T) {
 			Timing:   policy.TemplateTiming{DwellMs: 5000, ReleaseMs: 5000},
 		},
 	}
-	eng := policy.NewEngine(instances, templates, nil, nil)
+	eng := policy.NewEngine(instances, templates, nil)
 	eng.SetClock(clock.now)
 
 	p := NewPipeline(topology.NewEmpty(), eng, nil, zap.NewNop())

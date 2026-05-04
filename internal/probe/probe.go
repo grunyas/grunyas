@@ -22,18 +22,18 @@ import (
 type Liveness int
 
 const (
-	LivenessUp Liveness = iota
+	LivenessUnknown Liveness = iota
+	LivenessUp
 	LivenessDegraded
 	LivenessDown
-	LivenessUnknown
 )
 
 type Role int
 
 const (
-	RolePrimary Role = iota
+	RoleUnknown Role = iota
+	RolePrimary
 	RoleReplica
-	RoleUnknown
 )
 
 // Sink is the interface through which probe results are delivered.
@@ -46,7 +46,7 @@ type Sink interface {
 	// M2: replication lag
 	UpdateLag(id string, lagMs int64, sampledAt time.Time)
 	MarkLagIdle(id string, sampledAt time.Time)
-	MarkLagUnknown(id string, reason error)
+	MarkLagUnknown(id string, reason error, sampledAt time.Time)
 }
 
 type NodeSpec struct {
@@ -99,7 +99,10 @@ func New(ctx context.Context, spec NodeSpec, sink Sink, cfg ProbeConfig, log *za
 func (p *Probe) Close() {
 	p.cancel()
 	p.wg.Wait()
+	p.closeConn()
+}
 
+func (p *Probe) closeConn() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.conn != nil {
@@ -166,6 +169,7 @@ func (p *Probe) probeOnce() {
 	// 1. Liveness ping
 	if err := p.ping(conn); err != nil {
 		log.Debug("probe ping failed", zap.Error(err))
+		p.closeConn()
 		p.recordFailure(err)
 		return
 	}
@@ -174,6 +178,7 @@ func (p *Probe) probeOnce() {
 	role, err := p.fetchRole(conn)
 	if err != nil {
 		log.Debug("probe role query failed", zap.Error(err))
+		p.closeConn()
 		p.recordFailure(err)
 		return
 	}
@@ -183,11 +188,13 @@ func (p *Probe) probeOnce() {
 	sid, err := p.fetchSystemID(conn)
 	if err != nil {
 		log.Debug("probe system_id query failed", zap.Error(err))
+		p.closeConn()
 		p.recordFailure(err)
 		return
 	}
 	if err := p.sink.UpdateSystemID(p.spec.ID, sid); err != nil {
 		log.Error("system_identifier mismatch — marking node permanently down", zap.Error(err))
+		p.closeConn()
 		p.recordFailure(err)
 		return
 	}
@@ -197,7 +204,7 @@ func (p *Probe) probeOnce() {
 		lagMs, idle, lagErr := p.fetchLag(conn)
 		if lagErr != nil {
 			log.Debug("probe lag query failed", zap.Error(lagErr))
-			p.sink.MarkLagUnknown(p.spec.ID, lagErr)
+			p.sink.MarkLagUnknown(p.spec.ID, lagErr, time.Now())
 			// Lag failure does not affect liveness; continue.
 		} else if idle {
 			p.sink.MarkLagIdle(p.spec.ID, time.Now())
@@ -249,11 +256,11 @@ func (p *Probe) getOrOpenConn() (*pgx.Conn, error) {
 			return existing, nil
 		}
 		p.logger.Debug("probe connection lost, reconnecting")
-		_ = existing.Close(p.ctx)
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = existing.Close(closeCtx)
+		cancel()
 		p.mu.Lock()
-		if p.conn == existing {
-			p.conn = nil
-		}
+		p.conn = nil
 		p.mu.Unlock()
 	}
 
@@ -317,8 +324,12 @@ func (p *Probe) recordFailure(err error) {
 	}
 	p.mu.Unlock()
 
+	// Always report to the sink so lastProbeAt is updated.
+	// Only cross the threshold signals a liveness change to Down.
 	if fc >= threshold {
 		p.sink.UpdateLiveness(p.spec.ID, LivenessDown, err)
+	} else {
+		p.sink.UpdateLiveness(p.spec.ID, LivenessUp, err)
 	}
 }
 

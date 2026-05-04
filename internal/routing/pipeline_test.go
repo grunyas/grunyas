@@ -18,7 +18,7 @@ func TestRoundRobinDistributesFairly(t *testing.T) {
 
 	counts := map[topology.NodeID]int{}
 	for i := 0; i < 99; i++ {
-		chosen := p.selectNode(eligible, "read")
+		chosen := p.selectNode(eligible, "read", topology.NodeView{}, false)
 		counts[chosen]++
 	}
 
@@ -35,7 +35,7 @@ func TestSelectNodeWriteFallsThroughWhenPrimaryNotFound(t *testing.T) {
 	p := NewPipeline(topo, nil, nil, zap.NewNop())
 
 	eligible := []topology.NodeID{"n1", "n2"}
-	chosen := p.selectNode(eligible, "write")
+	chosen := p.selectNode(eligible, "write", topology.NodeView{}, false)
 	if chosen != "n1" {
 		t.Fatalf("selectNode fallback when Primary() not found: expected n1, got %s", chosen)
 	}
@@ -50,14 +50,14 @@ func TestRoundRobinModuloShrink(t *testing.T) {
 	eligible3 := []topology.NodeID{"r1", "r2", "r3"}
 	last := topology.NodeID("")
 	for i := 0; i < 5; i++ {
-		last = p.selectNode(eligible3, "read")
+		last = p.selectNode(eligible3, "read", topology.NodeView{}, false)
 	}
 	// After 5 calls: counter values are 1,2,3,4,5 → selections: r2, r3, r1, r2, r3
 	// Counter is now 5
 
 	// Shrink to 2: counter becomes 6, 6%2 = 0 → picks rA
 	eligible2 := []topology.NodeID{"rA", "rB"}
-	chosen := p.selectNode(eligible2, "read")
+	chosen := p.selectNode(eligible2, "read", topology.NodeView{}, false)
 	if chosen != "rA" {
 		t.Fatalf("modulo on shrink expected rA (6%%2=0), got %s", chosen)
 	}
@@ -101,7 +101,7 @@ func TestPipelineEligibleSetSizeUpdate(t *testing.T) {
 
 func TestPolicyNameHelpers(t *testing.T) {
 	templates := policy.NewTemplateSet()
-	eng := policy.NewEngine(nil, templates, nil, nil)
+	eng := policy.NewEngine(nil, templates, nil)
 	n := policyDefaultHealthNameOrFirst(eng)
 	if n != "default-health-filter" {
 		t.Fatalf("expected default-health-filter, got %s", n)

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -509,6 +510,298 @@ func ExampleServer_healthz() {
 // suppress unused import lint
 var _ = context.Background
 
+// sensitiveFields walks the Config struct tree and returns a map of
+// json tag name -> sensitive action ("true" or "count") for every field
+// that carries a `sensitive` tag. New secret fields are automatically
+// discovered here; the coverage test below fails if redactConfig does not
+// handle them.
+func sensitiveFields(t reflect.Type) map[string]string {
+	result := make(map[string]string)
+	var walk func(reflect.Type)
+	walk = func(rt reflect.Type) {
+		for i := 0; i < rt.NumField(); i++ {
+			f := rt.Field(i)
+			if f.Anonymous {
+				walk(f.Type)
+				continue
+			}
+			action := f.Tag.Get("sensitive")
+			if action != "" {
+				jsonTag := f.Tag.Get("json")
+				if idx := strings.Index(jsonTag, ","); idx != -1 {
+					jsonTag = jsonTag[:idx]
+				}
+				if jsonTag != "" && jsonTag != "-" {
+					result[jsonTag] = action
+				}
+			}
+			switch f.Type.Kind() {
+			case reflect.Struct:
+				walk(f.Type)
+			case reflect.Slice, reflect.Array:
+				if f.Type.Elem().Kind() == reflect.Struct {
+					walk(f.Type.Elem())
+				}
+			case reflect.Map:
+				if f.Type.Elem().Kind() == reflect.Struct {
+					walk(f.Type.Elem())
+				}
+			}
+		}
+	}
+	walk(t)
+	return result
+}
+
+func TestRedactConfigCoverage(t *testing.T) {
+	fields := sensitiveFields(reflect.TypeOf(config.Config{}))
+	if len(fields) == 0 {
+		t.Fatal("no sensitive fields discovered — tags missing?")
+	}
+
+	for jsonKey, action := range fields {
+		switch action {
+		case "true":
+			m := map[string]interface{}{jsonKey: "secret123"}
+			redactConfig(m, nil)
+			if m[jsonKey] != "***" {
+				t.Fatalf("sensitive field %q not redacted", jsonKey)
+			}
+		case "count":
+			if jsonKey == "tokens" {
+				m := map[string]interface{}{
+					"admin_tokens": map[string]interface{}{
+						"tokens": map[string]interface{}{"k": "v"},
+					},
+				}
+				redactConfig(m, map[string]string{"h": "admin"})
+				at := m["admin_tokens"].(map[string]interface{})
+				if _, ok := at["tokens"]; ok {
+					t.Fatalf("sensitive field %q not stripped", jsonKey)
+				}
+				if at["token_count"] != 1 {
+					t.Fatalf("expected token_count=1 for %q, got %v", jsonKey, at["token_count"])
+				}
+			} else {
+				t.Fatalf("unknown count-sensitive field %q — add redaction rule to redactConfig", jsonKey)
+			}
+		default:
+			t.Fatalf("unknown sensitive tag %q for field %q", action, jsonKey)
+		}
+	}
+}
+
+func TestRedactConfigTokenStrip(t *testing.T) {
+	tokenHashes := map[string]string{"a1b2": "admin"}
+	m := map[string]interface{}{
+		"server": map[string]interface{}{
+			"admin_tokens": map[string]interface{}{
+				"tokens": map[string]interface{}{
+					"key1": "val1",
+				},
+			},
+		},
+	}
+	redactConfig(m, tokenHashes)
+	server := m["server"].(map[string]interface{})
+	adminTokens := server["admin_tokens"].(map[string]interface{})
+	if _, ok := adminTokens["tokens"]; ok {
+		t.Fatal("expected tokens key to be stripped")
+	}
+	if adminTokens["token_count"].(int) != 1 {
+		t.Fatalf("expected token_count=1, got %v", adminTokens["token_count"])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// nodeViewToJSON value types: catch regressions in JSON shape
+// ---------------------------------------------------------------------------
+
+func TestNodeViewToJSONValueTypes(t *testing.T) {
+	lagMs := int64(42)
+	nv := topology.NodeView{
+		ID:             "node-1",
+		Host:           "db.example.com",
+		Port:           5432,
+		DeclaredRole:   topology.RoleReplica,
+		ObservedRole:   topology.RoleReplica,
+		Liveness:       topology.LivenessUp,
+		SystemID:       "CLUSTER001",
+		LastProbeAt:    time.Now(),
+		LastProbeErr:   fmt.Errorf("test error"),
+		ReplicationLagMs:    &lagMs,
+		ReplicationLagState: topology.LagStateFresh,
+		LastLagSampleAt:     time.Date(2026, 4, 28, 12, 0, 1, 0, time.UTC),
+		LivenessMaxAgeMs:       5000,
+		ObservedRoleMaxAgeMs:   5000,
+		ReplicationLagMaxAgeMs: 2000,
+	}
+
+	s := newTestServer(t, nil, nil)
+	j := s.nodeViewToJSON(nv)
+
+	assertString(t, j, "id", "node-1")
+	assertString(t, j, "host", "db.example.com")
+	assertUint(t, j, "port", uint64(nv.Port))
+	assertString(t, j, "declared_role", "replica")
+	assertString(t, j, "observed_role", "replica")
+	assertBool(t, j, "role_disagreement", false)
+	assertString(t, j, "liveness", "up")
+	assertString(t, j, "liveness_state", "fresh")
+	assertString(t, j, "system_identifier", "CLUSTER001")
+	assertBool(t, j, "system_identifier_match", false) // empty clusterID
+	assertString(t, j, "replication_lag_state", "fresh")
+	assertNumber(t, j, "replication_lag_ms", float64(42))
+	assertString(t, j, "last_probe_error", "test error")
+	assertStringNotEmpty(t, j, "last_probe_at")
+	assertStringNotEmpty(t, j, "last_lag_sample_at")
+
+	// Verify no unexpected keys leak sensitive data
+	knownJSONKeys := map[string]bool{
+		"id": true, "host": true, "port": true,
+		"declared_role": true, "observed_role": true, "role_disagreement": true,
+		"liveness": true, "liveness_state": true,
+		"system_identifier": true, "system_identifier_match": true,
+		"replication_lag_state": true, "replication_lag_ms": true,
+		"last_probe_at": true, "last_lag_sample_at": true, "last_probe_error": true,
+	}
+	for k := range j {
+		if !knownJSONKeys[k] {
+			t.Errorf("nodeViewToJSON: unexpected key %q — regression or new field without test update", k)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// replication_lag_state full vocabulary
+// ---------------------------------------------------------------------------
+
+func TestReplicationLagStateFullVocabulary(t *testing.T) {
+	s := newTestServer(t, nil, nil)
+	cases := []struct {
+		state topology.LagState
+		wire  string
+	}{
+		{topology.LagStateFresh, "fresh"},
+		{topology.LagStateStale, "stale"},
+		{topology.LagStateUnknown, "unknown"},
+		{topology.LagStateIdle, "idle"},
+		{topology.LagStateNotApplicable, "not_applicable"},
+	}
+	for _, tc := range cases {
+		nv := topology.NodeView{
+			ID:                  "n",
+			LastProbeAt:         time.Now(),
+			ReplicationLagState: tc.state,
+		}
+		j := s.nodeViewToJSON(nv)
+		if got := j["replication_lag_state"]; got != tc.wire {
+			t.Errorf("replication_lag_state: state=%d got %q, want %q", tc.state, got, tc.wire)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// dedicated metrics listener configuration
+// ---------------------------------------------------------------------------
+
+func TestMetricsListenerConfig(t *testing.T) {
+	// Metrics config with separate address is accepted.
+	cfg := config.Default()
+	cfg.ServerConfig.Admin = config.AdminConfig{
+		ListenAddr: "127.0.0.1:9898",
+		Metrics: config.AdminMetricsConfig{
+			ListenAddr:   "127.0.0.1:9899",
+			AuthRequired: false,
+		},
+	}
+	_, err := New(nil, &cfg, zap.NewNop(), nil, nil)
+	if err != nil {
+		t.Fatalf("expected no error for separate addresses, got: %v", err)
+	}
+}
+
+func TestMetricsListenerAuthRequired(t *testing.T) {
+	cfg := config.Default()
+	cfg.ServerConfig.Admin = config.AdminConfig{
+		ListenAddr: "127.0.0.1:9898",
+		Metrics: config.AdminMetricsConfig{
+			ListenAddr:   "127.0.0.1:9899",
+			AuthRequired: true,
+		},
+	}
+	s, err := New(nil, &cfg, zap.NewNop(), nil, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if s.cfg.ServerConfig.Admin.Metrics.AuthRequired != true {
+		t.Fatal("expected AuthRequired to be true")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// JSON shape assertion helpers
+// ---------------------------------------------------------------------------
+
+func assertString(t *testing.T, j map[string]interface{}, key, want string) {
+	t.Helper()
+	v, ok := j[key].(string)
+	if !ok {
+		t.Fatalf("%s: expected string, got %T (%v)", key, j[key], j[key])
+	}
+	if v != want {
+		t.Fatalf("%s: got %q, want %q", key, v, want)
+	}
+}
+
+func assertNumber(t *testing.T, j map[string]interface{}, key string, want float64) {
+	t.Helper()
+	raw := j[key]
+	var v float64
+	switch n := raw.(type) {
+	case float64:
+		v = n
+	case int64:
+		v = float64(n)
+	default:
+		t.Fatalf("%s: expected number, got %T (%v)", key, raw, raw)
+		return
+	}
+	if v != want {
+		t.Fatalf("%s: got %v, want %v", key, v, want)
+	}
+}
+
+func assertUint(t *testing.T, j map[string]interface{}, key string, want uint64) {
+	t.Helper()
+	v, ok := j[key].(uint16)
+	if !ok {
+		t.Fatalf("%s: expected uint16, got %T (%v)", key, j[key], j[key])
+	}
+	if uint64(v) != want {
+		t.Fatalf("%s: got %v, want %v", key, v, want)
+	}
+}
+
+func assertStringNotEmpty(t *testing.T, j map[string]interface{}, key string) {
+	t.Helper()
+	v, ok := j[key].(string)
+	if !ok || v == "" {
+		t.Fatalf("%s: expected non-empty string, got %T (%v)", key, j[key], j[key])
+	}
+}
+
+func assertBool(t *testing.T, j map[string]interface{}, key string, want bool) {
+	t.Helper()
+	v, ok := j[key].(bool)
+	if !ok {
+		t.Fatalf("%s: expected bool, got %T (%v)", key, j[key], j[key])
+	}
+	if v != want {
+		t.Fatalf("%s: got %v, want %v", key, v, want)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // M3: SSE endpoint tests
 // ---------------------------------------------------------------------------
@@ -527,7 +820,7 @@ func TestSSENoBusReturns503(t *testing.T) {
 
 func TestSSEMaxSubscribersRejectsWith503(t *testing.T) {
 	bus := decisions.NewBus(1, 1)
-	policyEng := policy.NewEngine(nil, policy.NewTemplateSet(), bus, nil)
+	policyEng := policy.NewEngine(nil, policy.NewTemplateSet(), nil)
 	cfg := config.Default()
 	cfg.ServerConfig.Admin = config.AdminConfig{
 		ListenAddr: "127.0.0.1:0",
@@ -572,7 +865,7 @@ func TestSSEMaxSubscribersRejectsWith503(t *testing.T) {
 func TestSSEBackpressureDroppedFrame(t *testing.T) {
 	bus := decisions.NewBus(10, 1)
 	defer bus.Close()
-	policyEng := policy.NewEngine(nil, policy.NewTemplateSet(), bus, nil)
+	policyEng := policy.NewEngine(nil, policy.NewTemplateSet(), nil)
 	cfg := config.Default()
 	cfg.ServerConfig.Admin = config.AdminConfig{
 		ListenAddr: "127.0.0.1:0",
@@ -657,7 +950,7 @@ func TestDecisionEventFieldMapping(t *testing.T) {
 func TestSSEStreamingHeaders(t *testing.T) {
 	bus := decisions.NewBus(10, 10)
 	defer bus.Close()
-	policyEng := policy.NewEngine(nil, policy.NewTemplateSet(), bus, zap.NewNop())
+	policyEng := policy.NewEngine(nil, policy.NewTemplateSet(), zap.NewNop())
 	cfg := config.Default()
 	cfg.ServerConfig.Admin = config.AdminConfig{
 		ListenAddr: "127.0.0.1:0",

@@ -6,5 +6,5 @@ package config
 type AuthConfig struct {
 	Method   string `mapstructure:"method" json:"method"`
 	Username string `mapstructure:"username" json:"username"`
-	Password string `mapstructure:"password" json:"password"`
+	Password string `mapstructure:"password" json:"password" sensitive:"true"`
 }

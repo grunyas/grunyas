@@ -49,29 +49,32 @@ type Server struct {
 	policyEng    *policy.Engine
 
 	routingMetrics struct {
-		decisionsTotal    func() int64
-		decisionsLeased   func() int64
-		decisionsRejected func() int64
 		publishedTotal    func() int64
 		eligibleReadSize  func() int64
 		eligibleWriteSize func() int64
+		decisionBreakdown func() map[string]int64
+		durationHistogram func() map[string]map[float64]uint64
+		durationSum       func() map[string]int64
+		durationCount     func() map[string]int64
 	}
 }
 
 func (s *Server) SetRoutingMetrics(
-	decisionsTotal func() int64,
-	decisionsLeased func() int64,
-	decisionsRejected func() int64,
 	publishedTotal func() int64,
 	eligibleReadSize func() int64,
 	eligibleWriteSize func() int64,
+	decisionBreakdown func() map[string]int64,
+	durationHistogram func() map[string]map[float64]uint64,
+	durationSum func() map[string]int64,
+	durationCount func() map[string]int64,
 ) {
-	s.routingMetrics.decisionsTotal = decisionsTotal
-	s.routingMetrics.decisionsLeased = decisionsLeased
-	s.routingMetrics.decisionsRejected = decisionsRejected
 	s.routingMetrics.publishedTotal = publishedTotal
 	s.routingMetrics.eligibleReadSize = eligibleReadSize
 	s.routingMetrics.eligibleWriteSize = eligibleWriteSize
+	s.routingMetrics.decisionBreakdown = decisionBreakdown
+	s.routingMetrics.durationHistogram = durationHistogram
+	s.routingMetrics.durationSum = durationSum
+	s.routingMetrics.durationCount = durationCount
 }
 
 func New(topo *topology.Topology, cfg *config.Config, log *zap.Logger, bus *decisions.Bus, polEng *policy.Engine) (*Server, error) {
@@ -87,6 +90,7 @@ func New(topo *topology.Topology, cfg *config.Config, log *zap.Logger, bus *deci
 
 	for token, entry := range cfg.ServerConfig.AdminTokens.Tokens {
 		if token == "" {
+			s.logger.Warn("admin token with empty key ignored")
 			continue
 		}
 		h := sha256.Sum256([]byte(token))
@@ -152,7 +156,7 @@ func (s *Server) Run(ctx context.Context) error {
 		Addr:         addr,
 		Handler:      mux,
 		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 10 * time.Second,
+		WriteTimeout: 0, // disabled: SSE streams are long-lived; keepalive ticks at 15s
 		IdleTimeout:  30 * time.Second,
 	}
 
@@ -185,26 +189,36 @@ func (s *Server) Run(ctx context.Context) error {
 				}
 			}
 			if err := serveFn(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				s.logger.Warn("metrics listener error", zap.Error(err))
+				s.logger.Error("metrics listener error", zap.Error(err))
 			}
 		}()
 	}
 
 	s.logger.Info("admin listener starting", zap.String("addr", addr))
-	var lnErr error
-	if s.tlsConfig != nil {
-		ln, err := tls.Listen("tcp", addr, s.tlsConfig)
-		if err != nil {
-			return fmt.Errorf("admin TLS listen: %w", err)
+
+	errCh := make(chan error, 1)
+	go func() {
+		if s.tlsConfig != nil {
+			ln, err := tls.Listen("tcp", addr, s.tlsConfig)
+			if err != nil {
+				errCh <- fmt.Errorf("admin TLS listen: %w", err)
+				return
+			}
+			errCh <- s.httpSrv.Serve(ln)
+		} else {
+			errCh <- s.httpSrv.ListenAndServe()
 		}
-		lnErr = s.httpSrv.Serve(ln)
-	} else {
-		lnErr = s.httpSrv.ListenAndServe()
+	}()
+
+	select {
+	case <-ctx.Done():
+		return s.Close()
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return nil
 	}
-	if lnErr != nil && !errors.Is(lnErr, http.ErrServerClosed) {
-		return lnErr
-	}
-	return nil
 }
 
 // metricsTLSEnabled returns true when the metrics TLS config should be honored,
@@ -225,8 +239,10 @@ func (s *Server) Close() error {
 	s.closeOnce.Do(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := s.httpSrv.Shutdown(ctx); err != nil {
-			errs = append(errs, fmt.Sprintf("admin: %v", err))
+		if s.httpSrv != nil {
+			if err := s.httpSrv.Shutdown(ctx); err != nil {
+				errs = append(errs, fmt.Sprintf("admin: %v", err))
+			}
 		}
 		if s.metricsSrv != nil {
 			if err := s.metricsSrv.Shutdown(ctx); err != nil {
@@ -253,8 +269,15 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		}
 		h := sha256.Sum256([]byte(token))
 		role, ok := s.tokenHashes[hex.EncodeToString(h[:])]
-		if !ok || role != "admin" {
+		if !ok {
 			writeJSONError(w, http.StatusUnauthorized, "unauthorized", "invalid token")
+			return
+		}
+		if role != "admin" {
+			s.logger.Warn("authenticated token with insufficient role",
+				zap.String("role", role),
+			)
+			writeJSONError(w, http.StatusForbidden, "forbidden", "insufficient permissions")
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -270,7 +293,7 @@ func (s *Server) requestMetricsMiddleware(next http.Handler) http.Handler {
 		// Use chi route pattern so /nodes/{id} collapses into one series (M2 §7 #11).
 		routePath := chi.RouteContext(r.Context()).RoutePattern()
 		if routePath == "" {
-			routePath = r.URL.Path
+			routePath = "(unmatched)"
 		}
 		s.requestsTotal.WithLabelValues(routePath, r.Method, strconv.Itoa(ww.status)).Inc()
 		s.requestDur.WithLabelValues(routePath).Observe(dur)
@@ -367,26 +390,39 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, m)
 }
 
-// redactConfig walks a deserialized config map and redacts secrets per M2 §3 rules.
+// redactConfig recursively walks a deserialized config map and redacts secrets.
+// Fields carrying secrets are discovered via struct tags in the config package;
+// this map walker keys off the JSON field names so new tagged fields are
+// automatically covered as long as the corresponding json tag is added.
 func redactConfig(m map[string]interface{}, tokenHashes map[string]string) {
-	// Redact nodes[*].connection.password
-	if nodes, ok := m["nodes"].([]interface{}); ok {
-		for _, n := range nodes {
-			if nodeMap, ok := n.(map[string]interface{}); ok {
-				if conn, ok := nodeMap["connection"].(map[string]interface{}); ok {
-					if pwStr, ok := conn["password"].(string); ok && pwStr != "" {
-						conn["password"] = "***"
-					}
+	walkRedact(m, tokenHashes)
+}
+
+func walkRedact(v interface{}, tokenHashes map[string]string) {
+	switch m := v.(type) {
+	case map[string]interface{}:
+		for k, val := range m {
+			switch k {
+			case "password":
+				if s, ok := val.(string); ok && s != "" {
+					m[k] = "***"
 				}
+			case "admin_tokens":
+				if at, ok := val.(map[string]interface{}); ok {
+					delete(at, "tokens")
+					count := 0
+					if tokenHashes != nil {
+						count = len(tokenHashes)
+					}
+					at["token_count"] = count
+				}
+			default:
+				walkRedact(val, tokenHashes)
 			}
 		}
-	}
-
-	// Strip admin_tokens.tokens, expose token_count
-	if server, ok := m["server"].(map[string]interface{}); ok {
-		if adminTokens, ok := server["admin_tokens"].(map[string]interface{}); ok {
-			delete(adminTokens, "tokens")
-			adminTokens["token_count"] = len(tokenHashes)
+	case []interface{}:
+		for _, item := range m {
+			walkRedact(item, tokenHashes)
 		}
 	}
 }
@@ -478,14 +514,6 @@ func (s *Server) handleDecisionsSSE(w http.ResponseWriter, r *http.Request) {
 				}
 				_, _ = fmt.Fprintf(w, "event: decision\nid: %s\ndata: %s\n\n", v.EventID, data)
 				flusher.Flush()
-			case policy.Transition:
-				data, err := json.Marshal(v)
-				if err != nil {
-					s.logger.Error("failed to marshal policy transition for SSE", zap.Error(err))
-					continue
-				}
-				_, _ = fmt.Fprintf(w, "event: policy_transition\ndata: %s\n\n", data)
-				flusher.Flush()
 			}
 
 			if drops := sub.DrainDropped(); drops > 0 {
@@ -525,9 +553,11 @@ func (s *Server) policyView(inst policy.Instance) map[string]interface{} {
 		entry := map[string]interface{}{
 			"node_id":           nodeID,
 			"state":             cs.State.String(),
-			"entered_state_at":  cs.EnteredStateAt.UTC().Format(time.RFC3339Nano),
 		}
-		if cs.LastCondition != "" {
+		if !cs.EnteredStateAt.IsZero() {
+			entry["entered_state_at"] = cs.EnteredStateAt.UTC().Format(time.RFC3339Nano)
+		}
+		if cs.State == policy.StateActive && cs.LastCondition != "" {
 			entry["last_observation_reason"] = cs.LastCondition
 		}
 		candidates = append(candidates, entry)
@@ -536,11 +566,15 @@ func (s *Server) policyView(inst policy.Instance) map[string]interface{} {
 		return candidates[i]["node_id"].(string) < candidates[j]["node_id"].(string)
 	})
 
+	params := inst.Parameters
+	if params == nil {
+		params = map[string]int{}
+	}
 	return map[string]interface{}{
 		"name":       inst.Name,
 		"template":   inst.Template,
 		"scope":      inst.Scope,
-		"parameters": inst.Parameters,
+		"parameters": params,
 		"timing": map[string]int{
 			"dwell_ms":   inst.Timing.DwellMs,
 			"release_ms": inst.Timing.ReleaseMs,
@@ -555,7 +589,6 @@ func (s *Server) policyView(inst policy.Instance) map[string]interface{} {
 
 func (s *Server) poolViews() []map[string]interface{} {
 	result := make([]map[string]interface{}, 0)
-	nodes := s.topo.Nodes()
 
 	for portID := range s.cfg.ServerConfig.Ports {
 		portCfg := s.cfg.ServerConfig.Ports[portID]
@@ -564,7 +597,19 @@ func (s *Server) poolViews() []map[string]interface{} {
 			poolMode = "session"
 		}
 
-		for _, nv := range nodes {
+		var candidateNodes []topology.NodeView
+		switch portID {
+		case "write":
+			if primary, ok := s.topo.Primary(); ok {
+				candidateNodes = append(candidateNodes, primary)
+			}
+		case "read":
+			candidateNodes = s.topo.Replicas()
+		default:
+			continue
+		}
+
+		for _, nv := range candidateNodes {
 			mgr, err := s.topo.PoolFor(nv.ID)
 			if err != nil {
 				continue
@@ -618,8 +663,16 @@ func (s *Server) nodeViewToJSON(nv topology.NodeView) map[string]interface{} {
 		"system_identifier":       string(nv.SystemID),
 		"system_identifier_match": nv.SystemID != "" && nv.SystemID == clusterID,
 		"replication_lag_state":   nv.ReplicationLagState.String(),
-		"last_probe_at":           nv.LastProbeAt.UTC().Format(time.RFC3339Nano),
-		"last_lag_sample_at":      nv.LastLagSampleAt.UTC().Format(time.RFC3339Nano),
+	}
+	if nv.LastProbeAt.IsZero() {
+		j["last_probe_at"] = nil
+	} else {
+		j["last_probe_at"] = nv.LastProbeAt.UTC().Format(time.RFC3339Nano)
+	}
+	if nv.LastLagSampleAt.IsZero() {
+		j["last_lag_sample_at"] = nil
+	} else {
+		j["last_lag_sample_at"] = nv.LastLagSampleAt.UTC().Format(time.RFC3339Nano)
 	}
 	if nv.ReplicationLagMs != nil {
 		j["replication_lag_ms"] = *nv.ReplicationLagMs
@@ -669,7 +722,7 @@ func writeJSONError(w http.ResponseWriter, status int, code, message string) {
 
 func extractBearerToken(r *http.Request) string {
 	h := r.Header.Get("Authorization")
-	if !strings.HasPrefix(h, "Bearer ") {
+	if len(h) < 7 || !strings.EqualFold(h[:7], "Bearer ") {
 		return ""
 	}
 	return strings.TrimSpace(h[7:])
@@ -724,11 +777,17 @@ func (c *topologyCollector) Describe(ch chan<- *prometheus.Desc) {
 func (c *topologyCollector) Collect(ch chan<- prometheus.Metric) {
 	bi, ok := debug.ReadBuildInfo()
 	if ok {
-		version := "unknown"
+		version := bi.Main.Version
+		if version == "" || version == "(devel)" {
+			version = "unknown"
+		}
 		commit := "unknown"
 		for _, s := range bi.Settings {
-			if s.Key == "vcs.revision" {
+			switch s.Key {
+			case "vcs.revision":
 				commit = s.Value
+			case "vcs.time":
+				// ignore; commit is sufficient
 			}
 		}
 		ch <- prometheus.MustNewConstMetric(buildInfoDesc, prometheus.GaugeValue, 1, version, commit, bi.GoVersion)
@@ -757,13 +816,9 @@ func (c *topologyCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 		ch <- prometheus.MustNewConstMetric(nodeLiveDesc, prometheus.GaugeValue, livenessVal, string(nv.ID))
 
-		for _, role := range []string{"primary", "replica", "unknown"} {
-			v := 0.0
-			if nv.ObservedRole.String() == role {
-				v = 1
-			}
-			ch <- prometheus.MustNewConstMetric(nodeRoleDesc, prometheus.GaugeValue, v, string(nv.ID), role)
-		}
+		// Emit a single observed_role gauge with the node's current role as the label value.
+		roleStr := nv.ObservedRole.String()
+		ch <- prometheus.MustNewConstMetric(nodeRoleDesc, prometheus.GaugeValue, 1, string(nv.ID), roleStr)
 
 		disagreement := 0.0
 		if nv.ObservedRole != topology.RoleUnknown && nv.ObservedRole != nv.DeclaredRole {
@@ -771,7 +826,7 @@ func (c *topologyCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 		ch <- prometheus.MustNewConstMetric(nodeDisagDesc, prometheus.GaugeValue, disagreement, string(nv.ID))
 
-		if nv.ReplicationLagMs != nil && nv.ReplicationLagState == topology.LagStateFresh {
+		if nv.ReplicationLagMs != nil {
 			ch <- prometheus.MustNewConstMetric(nodeLagDesc, prometheus.GaugeValue, float64(*nv.ReplicationLagMs), string(nv.ID))
 		}
 
@@ -808,7 +863,6 @@ var (
 	decEligSetSizeDesc   = prometheus.NewDesc("grunyas_routing_eligible_set_size", "Eligible set size.", []string{"port"}, nil)
 	decDurDesc           = prometheus.NewDesc("grunyas_routing_decision_duration_seconds", "Decision duration seconds.", []string{"port"}, nil)
 	policyStateDesc      = prometheus.NewDesc("grunyas_policy_state", "Policy state per candidate.", []string{"policy", "scope", "node_id", "state"}, nil)
-	policyTransDesc      = prometheus.NewDesc("grunyas_policy_transitions_total", "Policy transition count.", []string{"policy", "scope", "node_id", "from", "to"}, nil)
 	subsGaugeDesc        = prometheus.NewDesc("grunyas_decisions_subscribers", "Active SSE subscribers.", nil, nil)
 	subsPublishedDesc    = prometheus.NewDesc("grunyas_decisions_published_total", "Published decision events.", nil, nil)
 	subsDroppedDesc      = prometheus.NewDesc("grunyas_decisions_dropped_total", "Dropped decision events.", []string{"reason"}, nil)
@@ -819,7 +873,6 @@ func (c *decisionCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- decEligSetSizeDesc
 	ch <- decDurDesc
 	ch <- policyStateDesc
-	ch <- policyTransDesc
 	ch <- subsGaugeDesc
 	ch <- subsPublishedDesc
 	ch <- subsDroppedDesc
@@ -830,15 +883,13 @@ func (c *decisionCollector) Collect(ch chan<- prometheus.Metric) {
 
 	// Routing decisions
 	rm := s.routingMetrics
-	if rm.decisionsTotal != nil {
-		total := float64(rm.decisionsTotal())
-		ch <- prometheus.MustNewConstMetric(decTotalDesc, prometheus.CounterValue, total, "all", "all", "all")
-
-		if rm.decisionsLeased != nil {
-			ch <- prometheus.MustNewConstMetric(decTotalDesc, prometheus.CounterValue, float64(rm.decisionsLeased()), "all", "leased", "")
-		}
-		if rm.decisionsRejected != nil {
-			ch <- prometheus.MustNewConstMetric(decTotalDesc, prometheus.CounterValue, float64(rm.decisionsRejected()), "all", "rejected", "")
+	if rm.decisionBreakdown != nil {
+		for key, count := range rm.decisionBreakdown() {
+			parts := strings.SplitN(key, ":", 3)
+			if len(parts) != 3 {
+				continue
+			}
+			ch <- prometheus.MustNewConstMetric(decTotalDesc, prometheus.CounterValue, float64(count), parts[0], parts[1], parts[2])
 		}
 	}
 	if rm.eligibleReadSize != nil {
@@ -846,6 +897,19 @@ func (c *decisionCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	if rm.eligibleWriteSize != nil {
 		ch <- prometheus.MustNewConstMetric(decEligSetSizeDesc, prometheus.GaugeValue, float64(rm.eligibleWriteSize()), "write")
+	}
+	if rm.durationHistogram != nil && rm.durationSum != nil && rm.durationCount != nil {
+		hists := rm.durationHistogram()
+		sums := rm.durationSum()
+		counts := rm.durationCount()
+		for port, bucketMap := range hists {
+			count := uint64(counts[port])
+			if count == 0 {
+				continue
+			}
+			sumSec := float64(sums[port]) / 1e9
+			ch <- prometheus.MustNewConstHistogram(decDurDesc, count, sumSec, bucketMap, port)
+		}
 	}
 
 	// Policy states

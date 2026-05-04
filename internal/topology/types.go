@@ -11,9 +11,9 @@ type NodeID string
 type Role int
 
 const (
-	RolePrimary Role = iota
+	RoleUnknown Role = iota
+	RolePrimary
 	RoleReplica
-	RoleUnknown
 )
 
 func (r Role) String() string {
@@ -30,10 +30,10 @@ func (r Role) String() string {
 type Liveness int
 
 const (
-	LivenessUp Liveness = iota
-	LivenessDegraded
+	LivenessUnknown Liveness = iota
+	LivenessUp
+	LivenessDegraded // Not produced in OSS (requires query-latency tracking, deferred per MVP.md).
 	LivenessDown
-	LivenessUnknown
 )
 
 func (l Liveness) String() string {
@@ -54,10 +54,10 @@ type SystemID string
 type LagState int
 
 const (
-	LagStateFresh LagState = iota
+	LagStateUnknown LagState = iota
+	LagStateFresh
 	LagStateIdle
 	LagStateStale
-	LagStateUnknown
 	LagStateNotApplicable
 )
 
