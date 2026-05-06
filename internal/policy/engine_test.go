@@ -4,12 +4,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/grunyas/grunyas/internal/decisions"
 	"github.com/grunyas/grunyas/internal/topology"
 )
 
 func newTestEngine(instances []Instance) *Engine {
 	templates := NewTemplateSet()
-	return NewEngine(instances, templates, nil)
+	return NewEngine(instances, templates, nil, nil)
 }
 
 func TestHysteresisCleanToActive(t *testing.T) {
@@ -157,17 +158,11 @@ func TestHysteresisActiveToReleasingToClean(t *testing.T) {
 		LastLagSampleAt:     clock.t,
 	}
 
-	// Dwell=0: still takes two calls — first goes to pending
+	// Dwell=0: first call goes straight to active (no pending lag)
 	e.EvaluateNode(nv, false)
 	state, _, _ := e.CandidateState("test-lag", "replica-1")
-	if state != StatePending {
-		t.Fatalf("expected pending on first eval, got %s", state)
-	}
-	// Second call: transition pending→active (dwell=0, any time elapsed satisfies it)
-	e.EvaluateNode(nv, false)
-	state, _, _ = e.CandidateState("test-lag", "replica-1")
 	if state != StateActive {
-		t.Fatalf("expected active on second eval with dwell=0, got %s", state)
+		t.Fatalf("expected active on first eval with dwell=0, got %s", state)
 	}
 
 	// Recover → releasing
@@ -184,6 +179,68 @@ func TestHysteresisActiveToReleasingToClean(t *testing.T) {
 	state, _, _ = e.CandidateState("test-lag", "replica-1")
 	if state != StateClean {
 		t.Fatalf("expected clean after release, got %s", state)
+	}
+}
+
+func TestTransitionEventPublished(t *testing.T) {
+	clock := &manualClock{t: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	bus := decisions.NewBus(10, 10)
+	defer bus.Close()
+
+	instances := []Instance{
+		{
+			Name:     "test-health",
+			Template: TemplateHealthFilter,
+			Scope:    "cluster",
+			Timing:   TemplateTiming{DwellMs: 0, ReleaseMs: 0},
+		},
+	}
+	templates := NewTemplateSet()
+	eng := NewEngine(instances, templates, bus, nil)
+	eng.SetClock(clock.now)
+
+	sub, ok := bus.Subscribe()
+	if !ok {
+		t.Fatal("failed to subscribe to bus")
+	}
+	defer sub.Unsub()
+
+	nv := topology.NodeView{
+		ID:           "replica-1",
+		DeclaredRole: topology.RoleReplica,
+		ObservedRole: topology.RoleReplica,
+		Liveness:     topology.LivenessDown,
+	}
+
+	// Dwell=0 on health filter + LivenessDown → clean→active in one call
+	eng.EvaluateNode(nv, false)
+
+	select {
+	case msg := <-sub.Ch:
+		te, ok := msg.(decisions.TransitionEvent)
+		if !ok {
+			t.Fatalf("expected TransitionEvent, got %T", msg)
+		}
+		if te.EventID == "" {
+			t.Fatal("expected EventID to be stamped by bus.Publish")
+		}
+		if te.SchemaVersion != decisions.SchemaVersion {
+			t.Fatalf("expected SchemaVersion %q, got %q", decisions.SchemaVersion, te.SchemaVersion)
+		}
+		if te.Timestamp.IsZero() {
+			t.Fatal("expected Timestamp to be stamped by bus.Publish")
+		}
+		if te.FromState != "clean" {
+			t.Fatalf("expected FromState=clean, got %q", te.FromState)
+		}
+		if te.ToState != "active" {
+			t.Fatalf("expected ToState=active, got %q", te.ToState)
+		}
+		if te.NodeID != "replica-1" {
+			t.Fatalf("expected NodeID=replica-1, got %q", te.NodeID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for transition event on bus")
 	}
 }
 

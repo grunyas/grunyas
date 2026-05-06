@@ -820,7 +820,7 @@ func TestSSENoBusReturns503(t *testing.T) {
 
 func TestSSEMaxSubscribersRejectsWith503(t *testing.T) {
 	bus := decisions.NewBus(1, 1)
-	policyEng := policy.NewEngine(nil, policy.NewTemplateSet(), nil)
+	policyEng := policy.NewEngine(nil, policy.NewTemplateSet(), nil, nil)
 	cfg := config.Default()
 	cfg.ServerConfig.Admin = config.AdminConfig{
 		ListenAddr: "127.0.0.1:0",
@@ -865,7 +865,7 @@ func TestSSEMaxSubscribersRejectsWith503(t *testing.T) {
 func TestSSEBackpressureDroppedFrame(t *testing.T) {
 	bus := decisions.NewBus(10, 1)
 	defer bus.Close()
-	policyEng := policy.NewEngine(nil, policy.NewTemplateSet(), nil)
+	policyEng := policy.NewEngine(nil, policy.NewTemplateSet(), nil, nil)
 	cfg := config.Default()
 	cfg.ServerConfig.Admin = config.AdminConfig{
 		ListenAddr: "127.0.0.1:0",
@@ -946,11 +946,55 @@ func TestDecisionEventFieldMapping(t *testing.T) {
 	}
 }
 
+func TestSSETransitionWireFormat(t *testing.T) {
+	bus := decisions.NewBus(10, 10)
+	defer bus.Close()
+	policyEng := policy.NewEngine(nil, policy.NewTemplateSet(), nil, nil)
+	cfg := config.Default()
+	cfg.ServerConfig.Admin = config.AdminConfig{
+		ListenAddr: "127.0.0.1:0",
+		Metrics:    config.DefaultAdminConfig().Metrics,
+	}
+	cfg.ServerConfig.AdminTokens = config.AdminTokenConfig{Tokens: map[string]config.AdminTokenEntry{"t": {Role: "admin"}}}
+
+	s, err := New(nil, &cfg, zap.NewNop(), bus, policyEng)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/decisions", nil)
+	req.Header.Set("Authorization", "Bearer t")
+	rec := httptest.NewRecorder()
+
+	ctx, cancel := context.WithCancel(req.Context())
+	req = req.WithContext(ctx)
+	defer cancel()
+
+	go func() {
+		// Give handler time to subscribe
+		time.Sleep(20 * time.Millisecond)
+		bus.Publish(decisions.TransitionEvent{PolicyName: "health", NodeID: "n1", FromState: "clean", ToState: "active"})
+		// Give handler time to write the event
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+
+	s.handleDecisionsSSE(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "event: transition") {
+		t.Fatalf("expected 'event: transition' in SSE body, got:\n%s", body)
+	}
+	if !strings.Contains(body, `"policy_name":"health"`) {
+		t.Fatalf("expected policy_name in transition payload, got:\n%s", body)
+	}
+}
+
 // TestSSEStreaming verifies the SSE endpoint sets proper headers and content type.
 func TestSSEStreamingHeaders(t *testing.T) {
 	bus := decisions.NewBus(10, 10)
 	defer bus.Close()
-	policyEng := policy.NewEngine(nil, policy.NewTemplateSet(), zap.NewNop())
+	policyEng := policy.NewEngine(nil, policy.NewTemplateSet(), nil, zap.NewNop())
 	cfg := config.Default()
 	cfg.ServerConfig.Admin = config.AdminConfig{
 		ListenAddr: "127.0.0.1:0",

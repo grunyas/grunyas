@@ -19,6 +19,7 @@ import (
 
 	"github.com/grunyas/grunyas/config"
 	"github.com/grunyas/grunyas/internal/auth"
+	"github.com/grunyas/grunyas/internal/classifier"
 	"github.com/grunyas/grunyas/internal/decisions"
 	"github.com/grunyas/grunyas/internal/routing"
 	"github.com/grunyas/grunyas/internal/server/downstream_client"
@@ -247,10 +248,33 @@ func (prx *Proxy) PublishDecisionEvent(event interface{}) {
 	if prx.decisionsBus == nil {
 		return
 	}
-	switch e := event.(type) {
-	case decisions.Event:
-		prx.decisionsBus.Publish(e)
+	prx.decisionsBus.Publish(event)
+}
+
+// RejectReadPortWrite routes a read-port write rejection through the
+// pipeline so metrics stay consistent.  If the pipeline is not available
+// (e.g. in tests) it returns a correctly-shaped event without publishing.
+func (prx *Proxy) RejectReadPortWrite(sql, poolMode string) decisions.Event {
+	if prx.routingPipeline == nil {
+		cls, clsSource := classifier.NewPortClassifier("read").Classify(sql)
+		return decisions.Event{
+			Port:      "read",
+			PoolMode:  poolMode,
+			LeaseType: "transaction",
+			Source:    "client",
+			Classification: decisions.Classification{
+				Type:   string(cls),
+				Source: clsSource,
+				SQL:    classifier.TruncateSQL(sql, 256),
+			},
+			Outcome: decisions.Outcome{
+				Kind:     "rejected",
+				SQLState: "25006",
+				Reason:   "read_port:write_attempted",
+			},
+		}
 	}
+	return prx.routingPipeline.RejectReadPortWrite(sql, poolMode)
 }
 
 // AcquireUpstream acquires a connection using the routing pipeline.

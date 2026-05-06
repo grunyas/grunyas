@@ -3,8 +3,10 @@ package policy
 import (
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/grunyas/grunyas/internal/decisions"
 	"github.com/grunyas/grunyas/internal/topology"
 	"go.uber.org/zap"
 )
@@ -79,9 +81,12 @@ type Engine struct {
 	instances map[string]*Instance
 	templates *templateSet
 	logger    *zap.Logger
+	bus       *decisions.Bus
 
 	states map[string]map[string]*perNodeState
 	now    func() time.Time
+
+	TransitionsPublished atomic.Int64
 }
 
 type perNodeState struct {
@@ -90,13 +95,14 @@ type perNodeState struct {
 	lastCondition string
 }
 
-func NewEngine(instances []Instance, templates *templateSet, log *zap.Logger) *Engine {
+func NewEngine(instances []Instance, templates *templateSet, bus *decisions.Bus, log *zap.Logger) *Engine {
 	if log == nil {
 		log = zap.NewNop()
 	}
 	e := &Engine{
 		instances: make(map[string]*Instance),
 		templates: templates,
+		bus:       bus,
 		states:    make(map[string]map[string]*perNodeState),
 		logger:    log.With(zap.String("component", "policy")),
 		now:       time.Now,
@@ -195,7 +201,12 @@ func (e *Engine) transition(policyName string, inst *Instance, nodeID string, re
 	switch oldState {
 	case StateClean:
 		if reject {
-			newState = StatePending
+			dwell := time.Duration(inst.Timing.DwellMs) * time.Millisecond
+			if dwell == 0 {
+				newState = StateActive
+			} else {
+				newState = StatePending
+			}
 			pns.enteredAt = now
 			pns.lastCondition = reason
 		}
@@ -222,7 +233,7 @@ func (e *Engine) transition(policyName string, inst *Instance, nodeID string, re
 			pns.lastCondition = reason
 		} else {
 			release := time.Duration(inst.Timing.ReleaseMs) * time.Millisecond
-			if now.Sub(pns.enteredAt) >= release {
+			if release == 0 || now.Sub(pns.enteredAt) >= release {
 				newState = StateClean
 				pns.lastCondition = ""
 			}
@@ -233,6 +244,18 @@ func (e *Engine) transition(policyName string, inst *Instance, nodeID string, re
 		pns.state = newState
 		if newState == StatePending || newState == StateActive || newState == StateReleasing {
 			pns.enteredAt = now
+		}
+		if e.bus != nil {
+			e.TransitionsPublished.Add(1)
+			e.bus.Publish(decisions.TransitionEvent{
+				PolicyName: policyName,
+				Template:   inst.Template,
+				Scope:      inst.Scope,
+				NodeID:     nodeID,
+				FromState:  oldState.String(),
+				ToState:    newState.String(),
+				Reason:     reason,
+			})
 		}
 	}
 }

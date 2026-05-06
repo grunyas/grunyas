@@ -64,7 +64,7 @@ func TestRoundRobinModuloShrink(t *testing.T) {
 	_ = last
 }
 
-func TestPipelineEmitEventPubishedCountIncremented(t *testing.T) {
+func TestPipelineEmitEventPublishedCountIncremented(t *testing.T) {
 	p := NewPipeline(topology.NewEmpty(), nil, decisions.NewBus(1, 1), zap.NewNop())
 	before := p.PublishedTotal.Load()
 	p.emitEvent(decisions.Event{
@@ -101,7 +101,7 @@ func TestPipelineEligibleSetSizeUpdate(t *testing.T) {
 
 func TestPolicyNameHelpers(t *testing.T) {
 	templates := policy.NewTemplateSet()
-	eng := policy.NewEngine(nil, templates, nil)
+	eng := policy.NewEngine(nil, templates, nil, nil)
 	n := policyDefaultHealthNameOrFirst(eng)
 	if n != "default-health-filter" {
 		t.Fatalf("expected default-health-filter, got %s", n)

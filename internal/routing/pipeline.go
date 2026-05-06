@@ -84,6 +84,35 @@ func (p *Pipeline) Bus() *decisions.Bus {
 	return p.decisionsBus
 }
 
+// RejectReadPortWrite records a read-port write rejection through the
+// pipeline so DecisionsTotal, DecisionsRejected, PublishedTotal, and
+// decisionCounters stay consistent with routed leases.
+func (p *Pipeline) RejectReadPortWrite(sql, poolMode string) decisions.Event {
+	p.DecisionsTotal.Add(1)
+
+	cls, clsSource := classifier.NewPortClassifier("read").Classify(sql)
+	event := decisions.Event{
+		Port:      "read",
+		PoolMode:  poolMode,
+		LeaseType: "transaction",
+		Source:    "client",
+		Classification: decisions.Classification{
+			Type:   string(cls),
+			Source: clsSource,
+			SQL:    classifier.TruncateSQL(sql, 256),
+		},
+		Outcome: decisions.Outcome{
+			Kind:     "rejected",
+			SQLState: "25006",
+			Reason:   "read_port:write_attempted",
+		},
+	}
+
+	p.DecisionsRejected.Add(1)
+	p.emitEvent(event)
+	return event
+}
+
 func (p *Pipeline) PolicyEng() *policy.Engine {
 	return p.policyEng
 }
@@ -145,7 +174,7 @@ func (p *Pipeline) Lease(req LeaseRequest) (*LeaseResult, error) {
 	}
 	event.PoliciesActive = activePolicies
 
-	eligible := eligibleNodes(candidates, req.Port)
+	eligible := eligibleNodes(candidates)
 
 	if req.Port == "read" {
 		p.EligibleSetRead.Store(int64(len(eligible)))
@@ -194,7 +223,6 @@ func (p *Pipeline) Lease(req LeaseRequest) (*LeaseResult, error) {
 		Kind:   "leased",
 		NodeID: string(chosen),
 	}
-	p.DecisionsLeased.Add(1)
 	result.NodeID = chosen
 
 	mgr, err := p.topo.PoolFor(chosen)
@@ -202,10 +230,6 @@ func (p *Pipeline) Lease(req LeaseRequest) (*LeaseResult, error) {
 		result.Error = &types.ProxyError{Code: "57P03", Message: "[grunyas] no upstream available", Cause: err}
 		event.Outcome = decisions.Outcome{Kind: "rejected", SQLState: "57P03", Reason: "pool_lookup_failed"}
 		p.DecisionsRejected.Add(1)
-
-		// The final outcome is rejected, not leased. Correct the aggregate so
-		// leased + rejected stays consistent with total.
-		p.DecisionsLeased.Add(-1)
 		result.Decision = event
 		p.emitEvent(event)
 		return &result, nil
@@ -216,13 +240,13 @@ func (p *Pipeline) Lease(req LeaseRequest) (*LeaseResult, error) {
 		result.Error = &types.ProxyError{Code: "53300", Message: "[grunyas] pool saturated", Cause: err}
 		event.Outcome = decisions.Outcome{Kind: "rejected", SQLState: "53300", Reason: "pool:acquisition_failed"}
 		p.DecisionsRejected.Add(1)
-		p.DecisionsLeased.Add(-1)
 		result.Decision = event
 		p.emitEvent(event)
 		return &result, nil
 	}
 
 	result.Upstream = upstream
+	p.DecisionsLeased.Add(1)
 
 	switch req.Port {
 	case "read":
@@ -380,7 +404,7 @@ func (p *Pipeline) filterCandidates(nodes []topology.NodeView, port string) []de
 	return candidates
 }
 
-func eligibleNodes(candidates []decisions.Candidate, port string) []topology.NodeID {
+func eligibleNodes(candidates []decisions.Candidate) []topology.NodeID {
 	var result []topology.NodeID
 	for _, c := range candidates {
 		if c.Eligible {
@@ -461,22 +485,6 @@ func policyDefaultSatNameOrFirst(eng *policy.Engine) string {
 		}
 	}
 	return "default-pool-saturation-rejection"
-}
-
-func (p *Pipeline) IsEligibleReadPort(nv topology.NodeView) bool {
-	hName := policyDefaultHealthNameOrFirst(p.policyEng)
-	lName := policyDefaultLagNameOrFirst(p.policyEng)
-	sName := policyDefaultSatNameOrFirst(p.policyEng)
-	hOK, _ := p.policyEng.EvaluatePolicyState(hName, string(nv.ID))
-	if !hOK {
-		return false
-	}
-	lOK, _ := p.policyEng.EvaluatePolicyState(lName, string(nv.ID))
-	if !lOK {
-		return false
-	}
-	sOK, _ := p.policyEng.EvaluatePolicyState(sName, string(nv.ID))
-	return sOK
 }
 
 func (p *Pipeline) DecisionCountersSnapshot() map[string]int64 {

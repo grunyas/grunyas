@@ -6,8 +6,6 @@ import (
 	"time"
 )
 
-const ringCapacity = 1024
-
 type DroppedEvent struct {
 	Count int64  `json:"count"`
 	Since string `json:"since"`
@@ -26,12 +24,7 @@ type Bus struct {
 	maxSubs     int
 	bufSize     int
 
-	ring     []interface{}
-	ringPos  int
-	ringFull bool
-
 	droppedOTelOverflow atomic.Int64
-	droppedBusOverflow  atomic.Int64
 	droppedSubOverflow  atomic.Int64
 }
 
@@ -40,49 +33,29 @@ func NewBus(maxSubscribers, perSubscriberBuffer int) *Bus {
 		subscribers: make(map[uint64]*sub),
 		maxSubs:     maxSubscribers,
 		bufSize:     perSubscriberBuffer,
-		ring:        make([]interface{}, ringCapacity),
 	}
 }
 
-func (b *Bus) writeRing(event interface{}) {
-	if b.ringFull {
-		b.droppedBusOverflow.Add(1)
+func (b *Bus) Publish(event interface{}) {
+	now := time.Now().UTC()
+	switch e := event.(type) {
+	case Event:
+		e.EventID = NewULID()
+		e.Timestamp = now
+		e.SchemaVersion = SchemaVersion
+		event = e
+	case TransitionEvent:
+		e.EventID = NewULID()
+		e.Timestamp = now
+		e.SchemaVersion = SchemaVersion
+		event = e
 	}
-	b.ring[b.ringPos] = event
-	b.ringPos++
-	if b.ringPos == ringCapacity {
-		b.ringPos = 0
-		b.ringFull = true
-	}
-}
-
-func (b *Bus) drainRing() []interface{} {
-	if !b.ringFull && b.ringPos == 0 {
-		return nil
-	}
-	count := b.ringPos
-	if b.ringFull {
-		count = ringCapacity
-	}
-	out := make([]interface{}, 0, count)
-	if b.ringFull {
-		out = append(out, b.ring[b.ringPos:]...)
-	}
-	out = append(out, b.ring[:b.ringPos]...)
-	return out
-}
-
-func (b *Bus) Publish(event Event) {
-	event.EventID = NewULID()
-	event.Timestamp = time.Now().UTC()
-	event.SchemaVersion = SchemaVersion
 
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
 		return
 	}
-	b.writeRing(event)
 	b.mu.Unlock()
 
 	b.mu.RLock()
@@ -123,18 +96,6 @@ func (b *Bus) Subscribe() (*Subscription, bool) {
 	}
 	b.subscribers[id] = s
 
-	// Seed new subscriber with a snapshot of the ring for initial context.
-drainLoop:
-	for _, e := range b.drainRing() {
-		select {
-		case s.ch <- e:
-		default:
-			s.drops.Add(1)
-			b.droppedSubOverflow.Add(1)
-			break drainLoop
-		}
-	}
-
 	unsub := func() {
 		b.mu.Lock()
 		delete(b.subscribers, id)
@@ -160,10 +121,6 @@ func (b *Bus) SubscriberCount() int {
 
 func (b *Bus) DroppedOTelOverflow() int64 {
 	return b.droppedOTelOverflow.Load()
-}
-
-func (b *Bus) DroppedBusOverflow() int64 {
-	return b.droppedBusOverflow.Load()
 }
 
 func (b *Bus) DroppedSubOverflow() int64 {

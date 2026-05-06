@@ -104,7 +104,7 @@ func TestEligibleNodesEmpty(t *testing.T) {
 		{NodeID: "a", Eligible: false, Reasons: []string{"role:not_replica"}},
 		{NodeID: "b", Eligible: false, Reasons: []string{"liveness:down"}},
 	}
-	eligible := eligibleNodes(candidates, "read")
+	eligible := eligibleNodes(candidates)
 	if len(eligible) != 0 {
 		t.Fatalf("expected 0 eligible, got %d", len(eligible))
 	}
@@ -116,7 +116,7 @@ func TestEligibleNodesMixed(t *testing.T) {
 		{NodeID: "b", Eligible: true},
 		{NodeID: "c", Eligible: false, Reasons: []string{"liveness:down"}},
 	}
-	eligible := eligibleNodes(candidates, "read")
+	eligible := eligibleNodes(candidates)
 	if len(eligible) != 1 || eligible[0] != "b" {
 		t.Fatalf("expected [b], got %v", eligible)
 	}
@@ -194,7 +194,7 @@ func TestPipelineHysteresisPendingEligible(t *testing.T) {
 			Timing:   policy.TemplateTiming{DwellMs: 5000, ReleaseMs: 5000},
 		},
 	}
-	eng := policy.NewEngine(instances, templates, nil)
+	eng := policy.NewEngine(instances, templates, nil, nil)
 	eng.SetClock(clock.now)
 
 	p := NewPipeline(topology.NewEmpty(), eng, nil, zap.NewNop())

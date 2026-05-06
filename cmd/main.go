@@ -170,7 +170,7 @@ func main() {
 	// M3: Policy engine (creation after bus, since bus is its notification channel)
 	// -----------------------------------------------------------------------
 
-	policyEng := policy.NewEngine(policyInstances, templates, logger)
+	policyEng := policy.NewEngine(policyInstances, templates, decisionsBus, logger)
 
 	// -----------------------------------------------------------------------
 	// M3: Routing pipeline
@@ -198,6 +198,7 @@ func main() {
 
 	adminSrv.SetRoutingMetrics(
 		routingPipeline.PublishedTotal.Load,
+		policyEng.TransitionsPublished.Load,
 		routingPipeline.EligibleSetRead.Load,
 		routingPipeline.EligibleSetWrite.Load,
 		routingPipeline.DecisionCountersSnapshot,

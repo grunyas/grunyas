@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/grunyas/grunyas/config"
+	"github.com/grunyas/grunyas/internal/decisions"
 	"github.com/jackc/pgx/v5/pgproto3"
 	"go.uber.org/zap"
 )
@@ -62,6 +63,10 @@ type ProxyInterface interface {
 	// PublishDecisionEvent emits a decision event to the bus.
 	// If the proxy does not have a decisions bus, it is a no-op.
 	PublishDecisionEvent(event interface{})
+
+	// RejectReadPortWrite routes a read-port write rejection through the
+	// pipeline so metrics stay consistent.
+	RejectReadPortWrite(sql, poolMode string) decisions.Event
 }
 
 // PoolStats represents the current statistics of the database connection pool.
