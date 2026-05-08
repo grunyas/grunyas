@@ -21,25 +21,36 @@ This file is a fast-start guide for working on this project with minimal back-an
 
 - Default config is loaded from `./config.toml` if present (TOML).
 - Environment overrides use prefix `GRUNYAS_` and map dots to underscores.
-  Example: `GRUNYAS_SERVER_LISTEN_ADDR=0.0.0.0:5711`.
+  Example: `GRUNYAS_SERVER_PORTS_WRITE_LISTEN_ADDR=0.0.0.0:5711`.
 - CLI flag: `-no-console` disables the interactive TUI console.
-- Defaults set in `cmd/main.go` for SSL values:
-  - `server.ssl_mode=never`, `server.ssl_cert=""`, `server.ssl_key=""`.
-- Pool mode: `server.pool_mode` supports `session` (default) or `transaction`.
+- Listeners are configured per-port under `server.ports.<write|read|compat>`
+  (`listen_addr`, `pool_mode`, `ssl_mode`, `ssl_cert`, `ssl_key`).
+  Defaults for the optional ports are set in `cmd/main.go`.
+- `pool_mode` supports `session` (default) or `transaction`.
+- Upstream nodes are declared as `[[nodes]]` entries (multi-node).
 - Example config: `config.toml.example`.
 
 ## Project map (where to look first)
 
 - Entry point: `cmd/main.go`.
-- Config parsing/validation: `config/*.go`.
+- Config parsing/validation: `config/*.go` (split per concern: server, port,
+  node, auth, policy, probe, admin, telemetry, logging).
 - Core proxy server: `internal/server/proxy`.
 - Session lifecycle + protocol handling: `internal/server/session`.
 - Protocol message routing: `internal/server/messaging`.
 - Downstream (client wire protocol): `internal/server/downstream_client`.
-- Upstream (pool + pgx): `internal/pool` and `internal/pool/upstream_client`.
+- Shared server types: `internal/server/types`.
+- Upstream pool: `internal/pool/manager` and `internal/pool/upstream_client`.
+- Multi-node topology + health: `internal/topology`.
+- Routing + decisions (policy-driven dispatch): `internal/routing`,
+  `internal/decisions`, `internal/policy`, `internal/classifier`.
+- Health/readiness probes: `internal/probe`.
+- Admin endpoints: `internal/admin`.
 - Auth implementations: `internal/auth`.
+- Interactive TUI console: `internal/console`.
 - Logging + telemetry: `internal/logger`.
 - Utilities + adapters: `internal/utils`.
+- Load/protocol simulators: `simulators/`.
 - Tests: `internal/**` plus `tests/integration` and `tests/sql`.
 
 ## Architecture notes (read these before changing protocol flows)

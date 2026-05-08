@@ -11,6 +11,7 @@ import (
 
 	"github.com/grunyas/grunyas/config"
 	"github.com/grunyas/grunyas/internal/auth"
+	"github.com/grunyas/grunyas/internal/decisions"
 	"github.com/grunyas/grunyas/internal/server/downstream_client"
 	"github.com/grunyas/grunyas/internal/server/types"
 	"github.com/jackc/pgx/v5/pgproto3"
@@ -86,6 +87,10 @@ func (m *mockProxyServer) Port() string {
 }
 
 func (m *mockProxyServer) PublishDecisionEvent(event interface{}) {
+}
+
+func (m *mockProxyServer) RejectReadPortWrite(sql, poolMode string) decisions.Event {
+	return decisions.Event{}
 }
 
 type mockUpstream struct {

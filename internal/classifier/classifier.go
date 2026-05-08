@@ -37,7 +37,7 @@ func (pc *PortClassifier) Classify(sql string) (ClassType, string) {
 	case "read":
 		stmt := firstKeyword(sql)
 		if stmt == "" {
-			return TypeWrite, "default"
+			return TypeRead, "port"
 		}
 		if readKeywords[stmt] {
 			return TypeRead, "keyword"

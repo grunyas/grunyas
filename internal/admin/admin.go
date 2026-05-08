@@ -49,18 +49,20 @@ type Server struct {
 	policyEng    *policy.Engine
 
 	routingMetrics struct {
-		publishedTotal    func() int64
-		eligibleReadSize  func() int64
-		eligibleWriteSize func() int64
-		decisionBreakdown func() map[string]int64
-		durationHistogram func() map[string]map[float64]uint64
-		durationSum       func() map[string]int64
-		durationCount     func() map[string]int64
+		publishedTotal       func() int64
+		transitionsPublished func() int64
+		eligibleReadSize     func() int64
+		eligibleWriteSize    func() int64
+		decisionBreakdown    func() map[string]int64
+		durationHistogram    func() map[string]map[float64]uint64
+		durationSum          func() map[string]int64
+		durationCount        func() map[string]int64
 	}
 }
 
 func (s *Server) SetRoutingMetrics(
 	publishedTotal func() int64,
+	transitionsPublished func() int64,
 	eligibleReadSize func() int64,
 	eligibleWriteSize func() int64,
 	decisionBreakdown func() map[string]int64,
@@ -69,6 +71,7 @@ func (s *Server) SetRoutingMetrics(
 	durationCount func() map[string]int64,
 ) {
 	s.routingMetrics.publishedTotal = publishedTotal
+	s.routingMetrics.transitionsPublished = transitionsPublished
 	s.routingMetrics.eligibleReadSize = eligibleReadSize
 	s.routingMetrics.eligibleWriteSize = eligibleWriteSize
 	s.routingMetrics.decisionBreakdown = decisionBreakdown
@@ -156,7 +159,7 @@ func (s *Server) Run(ctx context.Context) error {
 		Addr:         addr,
 		Handler:      mux,
 		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 0, // disabled: SSE streams are long-lived; keepalive ticks at 15s
+		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  30 * time.Second,
 	}
 
@@ -491,6 +494,12 @@ func (s *Server) handleDecisionsSSE(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
+	// SSE streams are long-lived; clear the server-wide write deadline
+	// so the 30 s default does not cut off the connection.
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Time{}); err != nil {
+		s.logger.Warn("failed to clear SSE write deadline", zap.Error(err))
+	}
+
 	keepAlive := time.NewTicker(15 * time.Second)
 	defer keepAlive.Stop()
 
@@ -513,6 +522,14 @@ func (s *Server) handleDecisionsSSE(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				_, _ = fmt.Fprintf(w, "event: decision\nid: %s\ndata: %s\n\n", v.EventID, data)
+				flusher.Flush()
+			case decisions.TransitionEvent:
+				data, err := json.Marshal(v)
+				if err != nil {
+					s.logger.Error("failed to marshal transition event for SSE", zap.Error(err))
+					continue
+				}
+				_, _ = fmt.Fprintf(w, "event: transition\nid: %s\ndata: %s\n\n", v.EventID, data)
 				flusher.Flush()
 			}
 
@@ -863,9 +880,10 @@ var (
 	decEligSetSizeDesc   = prometheus.NewDesc("grunyas_routing_eligible_set_size", "Eligible set size.", []string{"port"}, nil)
 	decDurDesc           = prometheus.NewDesc("grunyas_routing_decision_duration_seconds", "Decision duration seconds.", []string{"port"}, nil)
 	policyStateDesc      = prometheus.NewDesc("grunyas_policy_state", "Policy state per candidate.", []string{"policy", "scope", "node_id", "state"}, nil)
-	subsGaugeDesc        = prometheus.NewDesc("grunyas_decisions_subscribers", "Active SSE subscribers.", nil, nil)
-	subsPublishedDesc    = prometheus.NewDesc("grunyas_decisions_published_total", "Published decision events.", nil, nil)
-	subsDroppedDesc      = prometheus.NewDesc("grunyas_decisions_dropped_total", "Dropped decision events.", []string{"reason"}, nil)
+	subsGaugeDesc              = prometheus.NewDesc("grunyas_decisions_subscribers", "Active SSE subscribers.", nil, nil)
+	subsPublishedDesc          = prometheus.NewDesc("grunyas_decisions_published_total", "Published decision events.", nil, nil)
+	transitionsPublishedDesc   = prometheus.NewDesc("grunyas_policy_transitions_published_total", "Published policy transition events.", nil, nil)
+	subsDroppedDesc            = prometheus.NewDesc("grunyas_decisions_dropped_total", "Dropped decision events.", []string{"reason"}, nil)
 )
 
 func (c *decisionCollector) Describe(ch chan<- *prometheus.Desc) {
@@ -875,6 +893,7 @@ func (c *decisionCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- policyStateDesc
 	ch <- subsGaugeDesc
 	ch <- subsPublishedDesc
+	ch <- transitionsPublishedDesc
 	ch <- subsDroppedDesc
 }
 
@@ -929,6 +948,8 @@ func (c *decisionCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 		ch <- prometheus.MustNewConstMetric(subsDroppedDesc, prometheus.CounterValue, float64(s.decisionsBus.DroppedOTelOverflow()), "otel_overflow")
 		ch <- prometheus.MustNewConstMetric(subsDroppedDesc, prometheus.CounterValue, float64(s.decisionsBus.DroppedSubOverflow()), "subscriber_overflow")
-		ch <- prometheus.MustNewConstMetric(subsDroppedDesc, prometheus.CounterValue, float64(s.decisionsBus.DroppedBusOverflow()), "bus_overflow")
+	}
+	if s.policyEng != nil {
+		ch <- prometheus.MustNewConstMetric(transitionsPublishedDesc, prometheus.CounterValue, float64(s.policyEng.TransitionsPublished.Load()))
 	}
 }

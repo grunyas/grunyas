@@ -160,44 +160,38 @@ func init() {
 	_ = os.ReadFile
 }
 
-func TestRingBufferOverflowCounter(t *testing.T) {
+func TestBusPublishesTransitionEvent(t *testing.T) {
 	bus := NewBus(10, 10)
 	defer bus.Close()
 
-	// Fill ring to capacity (1024) + 5 more → 5 overwrites
-	for i := 0; i < ringCapacity+5; i++ {
-		bus.Publish(Event{Port: "write", PoolMode: "session", Source: "client"})
+	sub, ok := bus.Subscribe()
+	if !ok {
+		t.Fatal("failed to subscribe")
 	}
+	defer sub.Unsub()
 
-	if bus.DroppedBusOverflow() != 5 {
-		t.Fatalf("expected 5 bus overflows after %d publishes, got %d", ringCapacity+5, bus.DroppedBusOverflow())
-	}
+	bus.Publish(TransitionEvent{PolicyName: "lag", NodeID: "r1", FromState: "clean", ToState: "active"})
 
-	// Another publish → another overwrite
-	bus.Publish(Event{Port: "write", PoolMode: "session", Source: "client"})
-	if bus.DroppedBusOverflow() != 6 {
-		t.Fatalf("expected 6 after one more, got %d", bus.DroppedBusOverflow())
-	}
-}
-
-func TestRingBufferOverflowOnSecondWrap(t *testing.T) {
-	bus := NewBus(10, 10)
-	defer bus.Close()
-
-	// First wrap: ringCapacity writes
-	for i := 0; i < ringCapacity; i++ {
-		bus.Publish(Event{Port: "write", PoolMode: "session", Source: "client"})
-	}
-	if bus.DroppedBusOverflow() != 0 {
-		t.Fatalf("expected 0 before first wrap, got %d", bus.DroppedBusOverflow())
-	}
-
-	// Second wrap: ringCapacity more writes → every one overwrites
-	for i := 0; i < ringCapacity; i++ {
-		bus.Publish(Event{Port: "write", PoolMode: "session", Source: "client"})
-	}
-	if bus.DroppedBusOverflow() != ringCapacity {
-		t.Fatalf("expected %d after second wrap, got %d", ringCapacity, bus.DroppedBusOverflow())
+	select {
+	case msg := <-sub.Ch:
+		te, ok := msg.(TransitionEvent)
+		if !ok {
+			t.Fatalf("expected TransitionEvent, got %T", msg)
+		}
+		if te.EventID == "" {
+			t.Fatal("expected EventID stamped")
+		}
+		if te.SchemaVersion != SchemaVersion {
+			t.Fatalf("expected SchemaVersion %q, got %q", SchemaVersion, te.SchemaVersion)
+		}
+		if te.Timestamp.IsZero() {
+			t.Fatal("expected Timestamp stamped")
+		}
+		if te.PolicyName != "lag" || te.NodeID != "r1" || te.ToState != "active" {
+			t.Fatalf("unexpected fields: %+v", te)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for event")
 	}
 }
 

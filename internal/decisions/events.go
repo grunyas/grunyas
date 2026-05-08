@@ -56,3 +56,20 @@ type Consistency struct {
 	LagThresholdMs    *int   `json:"lag_threshold_ms,omitempty"`
 	WindowRemainingMs *int   `json:"window_remaining_ms,omitempty"`
 }
+
+// TransitionEvent is a policy state-machine transition published to the
+// decisions bus.  It is distinct from Event (routing decisions) so that
+// consumers can dispatch on type and metrics stay clean.
+type TransitionEvent struct {
+	SchemaVersion string    `json:"schema_version"`
+	EventID       string    `json:"event_id"`
+	Timestamp     time.Time `json:"timestamp"`
+
+	PolicyName string `json:"policy_name"`
+	Template   string `json:"template"`
+	Scope      string `json:"scope"`
+	NodeID     string `json:"node_id"`
+	FromState  string `json:"from_state"`
+	ToState    string `json:"to_state"`
+	Reason     string `json:"reason,omitempty"`
+}

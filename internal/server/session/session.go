@@ -5,14 +5,12 @@ package session
 
 import (
 	"context"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/grunyas/grunyas/config"
 	"github.com/grunyas/grunyas/internal/classifier"
-	"github.com/grunyas/grunyas/internal/decisions"
 	"github.com/grunyas/grunyas/internal/server/messaging"
 	"github.com/grunyas/grunyas/internal/server/types"
 	"github.com/jackc/pgx/v5/pgproto3"
@@ -221,54 +219,41 @@ func (sess *Session) Run() {
 			}
 
 			// M3: Read-port contract enforcement
-			if sess.srv.Port() == "read" && isWriteAttempt(msg) {
-				sess.log.Info("write attempted on read port, rejecting",
-					zap.String("port", sess.srv.Port()))
-				if err := sess.downstream.Send(&pgproto3.ErrorResponse{
-					Severity: "ERROR",
-					Code:     "25006",
-					Message:  "[grunyas] write attempted on read port",
-				}); err != nil {
-					sess.log.Warn("failed to send read-port rejection", zap.Error(err))
-				}
-				if err := sess.downstream.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'}); err != nil {
-					sess.log.Warn("failed to send ReadyForQuery after rejection", zap.Error(err))
-				}
-				if err := sess.downstream.Flush(); err != nil {
-					sess.log.Warn("failed to flush after read-port rejection", zap.Error(err))
-					return
-				}
-
+			if sess.srv.Port() == "read" {
 				sql := ""
 				if q, ok := msg.(*pgproto3.Query); ok {
 					sql = q.String
 				} else if p, ok := msg.(*pgproto3.Parse); ok {
 					sql = p.Query
 				}
+				cls, _ := classifier.NewPortClassifier("read").Classify(sql)
+				if cls == classifier.TypeWrite {
+					sess.log.Info("write attempted on read port, rejecting",
+						zap.String("port", sess.srv.Port()))
+					if err := sess.downstream.Send(&pgproto3.ErrorResponse{
+						Severity: "ERROR",
+						Code:     "25006",
+						Message:  "[grunyas] write attempted on read port",
+					}); err != nil {
+						sess.log.Warn("failed to send read-port rejection", zap.Error(err))
+					}
+					if err := sess.downstream.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'}); err != nil {
+						sess.log.Warn("failed to send ReadyForQuery after rejection", zap.Error(err))
+					}
+					if err := sess.downstream.Flush(); err != nil {
+						sess.log.Warn("failed to flush after read-port rejection", zap.Error(err))
+						return
+					}
 
-				sess.srv.PublishDecisionEvent(decisions.Event{
-					Port:      "read",
-					PoolMode:  string(sess.poolMode),
-					LeaseType: "reject",
-					Source:    "client",
-					Classification: decisions.Classification{
-						Type:   "write",
-						Source: "keyword",
-						SQL:    classifier.TruncateSQL(sql, 256),
-					},
-					Outcome: decisions.Outcome{
-						Kind:     "rejected",
-						SQLState: "25006",
-						Reason:   "read_port:write_attempted",
-					},
-				})
+					sess.srv.RejectReadPortWrite(sql, string(sess.poolMode))
 
-				select {
-				case sess.downstreamAck <- struct{}{}:
-				case <-sess.ctx.Done():
-					return
+					select {
+					case sess.downstreamAck <- struct{}{}:
+					case <-sess.ctx.Done():
+						return
+					}
+					continue
 				}
-				continue
 			}
 
 			if err := sess.acquireUpstream(); err != nil {
@@ -541,28 +526,4 @@ func (sess *Session) downstreamReadLoop() {
 	}
 }
 
-// isWriteAttempt checks if a frontend message contains a write statement.
-// Used for read-port contract enforcement.
-func isWriteAttempt(msg pgproto3.FrontendMessage) bool {
-	switch m := msg.(type) {
-	case *pgproto3.Query:
-		return isWriteStatement(m.String)
-	case *pgproto3.Parse:
-		return isWriteStatement(m.Query)
-	default:
-		return false
-	}
-}
 
-func isWriteStatement(query string) bool {
-	trimmed := strings.TrimSpace(query)
-	upper := strings.ToUpper(trimmed)
-
-	readPrefixes := []string{"SELECT", "SHOW", "EXPLAIN", "FETCH", "VALUES", "WITH"}
-	for _, p := range readPrefixes {
-		if strings.HasPrefix(upper, p) {
-			return false
-		}
-	}
-	return true
-}
