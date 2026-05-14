@@ -256,15 +256,16 @@ func (prx *Proxy) PublishDecisionEvent(event interface{}) {
 // (e.g. in tests) it returns a correctly-shaped event without publishing.
 func (prx *Proxy) RejectReadPortWrite(sql, poolMode string) decisions.Event {
 	if prx.routingPipeline == nil {
-		cls, clsSource := classifier.NewPortClassifier("read").Classify(sql)
+		sess := &classifier.SessionState{Port: "read", TxState: classifier.TxIdle}
+		cls := classifier.Classify(classifier.Statement{SQL: sql}, sess)
 		return decisions.Event{
 			Port:      "read",
 			PoolMode:  poolMode,
 			LeaseType: "transaction",
 			Source:    "client",
 			Classification: decisions.Classification{
-				Type:   string(cls),
-				Source: clsSource,
+				Type:   string(cls.Type),
+				Source: string(cls.Source),
 				SQL:    classifier.TruncateSQL(sql, 256),
 			},
 			Outcome: decisions.Outcome{
@@ -277,10 +278,60 @@ func (prx *Proxy) RejectReadPortWrite(sql, poolMode string) decisions.Event {
 	return prx.routingPipeline.RejectReadPortWrite(sql, poolMode)
 }
 
+// RejectCompatReclassification routes a compat-port mid-transaction
+// reclassification rejection through the pipeline so metrics stay consistent.
+func (prx *Proxy) RejectCompatReclassification(sql, poolMode string) decisions.Event {
+	if prx.routingPipeline == nil {
+		sess := &classifier.SessionState{Port: "compat", TxState: classifier.TxIdle}
+		cls := classifier.Classify(classifier.Statement{SQL: sql}, sess)
+		return decisions.Event{
+			Port:      "compat",
+			PoolMode:  poolMode,
+			LeaseType: "transaction",
+			Source:    "client",
+			Classification: decisions.Classification{
+				Type:   string(cls.Type),
+				Source: string(cls.Source),
+				SQL:    classifier.TruncateSQL(sql, 256),
+			},
+			Outcome: decisions.Outcome{
+				Kind:     "rejected",
+				SQLState: "25006",
+				Reason:   "compat:reclassification",
+			},
+			Consistency: &decisions.Consistency{Mode: "bounded_staleness"},
+		}
+	}
+	return prx.routingPipeline.RejectCompatReclassification(sql, poolMode)
+}
+
 // AcquireUpstream acquires a connection using the routing pipeline.
 // The routing pipeline evaluates all candidates, applies policies,
 // and returns a connection to the chosen node along with a decision event.
 func (prx *Proxy) AcquireUpstream() (types.UpstreamClientInterface, error) {
+	return prx.acquireUpstreamWithSQL("")
+}
+
+// AcquireUpstreamForSQL acquires a connection using the routing pipeline
+// with SQL classification for compat-port routing decisions.
+func (prx *Proxy) AcquireUpstreamForSQL(sql string) (types.UpstreamClientInterface, error) {
+	return prx.acquireUpstreamWithSQL(sql)
+}
+
+func (prx *Proxy) acquireUpstreamWithSQL(sql string) (types.UpstreamClientInterface, error) {
+	lease, err := prx.acquireUpstreamLeaseWithSQL(sql, false, 0)
+	if err != nil {
+		return nil, err
+	}
+	return lease.Client, nil
+}
+
+// AcquireUpstreamLease acquires a connection and returns routing metadata.
+func (prx *Proxy) AcquireUpstreamLease(sql string, postWriteWindowActive bool, postWriteWindowRemainingMs int) (*types.UpstreamLease, error) {
+	return prx.acquireUpstreamLeaseWithSQL(sql, postWriteWindowActive, postWriteWindowRemainingMs)
+}
+
+func (prx *Proxy) acquireUpstreamLeaseWithSQL(sql string, postWriteWindowActive bool, postWriteWindowRemainingMs int) (*types.UpstreamLease, error) {
 	if prx.routingPipeline == nil {
 		// Fallback for tests: use old direct-primary path
 		if prx.topo == nil {
@@ -294,14 +345,24 @@ func (prx *Proxy) AcquireUpstream() (types.UpstreamClientInterface, error) {
 		if err != nil {
 			return nil, &types.ProxyError{Code: "57P03", Message: "[grunyas] no primary available", Cause: err}
 		}
-		return mgr.AcquireDbConnection()
+		upstream, err := mgr.AcquireDbConnection()
+		if err != nil {
+			return nil, &types.ProxyError{Code: "53300", Message: "[grunyas] pool saturated", Cause: err}
+		}
+		return &types.UpstreamLease{
+			Client: upstream,
+			NodeID: string(primary.ID),
+			Role:   primary.ObservedRole.String(),
+		}, nil
 	}
 
 	poolMode := prx.poolMode()
 	req := routing.LeaseRequest{
-		Port:     prx.port,
-		PoolMode: poolMode,
-		PoolSaturated: prx.buildPoolSaturatedMap(),
+		Port:                       prx.port,
+		PoolMode:                   poolMode,
+		SQL:                        sql,
+		PostWriteWindowActive:      postWriteWindowActive,
+		PostWriteWindowRemainingMs: postWriteWindowRemainingMs,
 	}
 	switch prx.port {
 	case "write":
@@ -323,7 +384,17 @@ func (prx *Proxy) AcquireUpstream() (types.UpstreamClientInterface, error) {
 	if result.Error != nil {
 		return nil, result.Error
 	}
-	return result.Upstream, nil
+
+	role := "unknown"
+	if nv, ok := prx.topo.Node(result.NodeID); ok {
+		role = nv.ObservedRole.String()
+	}
+
+	return &types.UpstreamLease{
+		Client: result.Upstream,
+		NodeID: string(result.NodeID),
+		Role:   role,
+	}, nil
 }
 
 func (prx *Proxy) poolMode() string {
@@ -332,23 +403,6 @@ func (prx *Proxy) poolMode() string {
 		return "session"
 	}
 	return portCfg.PoolMode
-}
-
-func (prx *Proxy) buildPoolSaturatedMap() map[topology.NodeID]bool {
-	if prx.topo == nil {
-		return nil
-	}
-	nodes := prx.topo.Nodes()
-	saturated := make(map[topology.NodeID]bool, len(nodes))
-	for _, nv := range nodes {
-		mgr, err := prx.topo.PoolFor(nv.ID)
-		if err != nil {
-			continue
-		}
-		stats := mgr.PoolStats()
-		saturated[nv.ID] = stats.AcquiredConns >= stats.MaxConns && stats.MaxConns > 0
-	}
-	return saturated
 }
 
 // Ready returns a channel that is closed when the proxy is successfully listening
@@ -391,20 +445,6 @@ func (prx *Proxy) handleNewIncomingConnection(conn net.Conn) {
 			prx.logger.Warn("failed to flush error response", zap.Error(err))
 		}
 
-		downstream.Close() //nolint:errcheck
-		return
-	}
-
-	// M3: compat port stub - reject all connections before session starts
-	if prx.port == "compat" {
-		if err := downstream.Send(&pgproto3.ErrorResponse{
-			Severity: "FATAL",
-			Code:     "0A000",
-			Message:  "[grunyas] compat port classification not yet implemented (M4)",
-		}); err != nil {
-			prx.logger.Warn("failed to buffer compat-port error", zap.Error(err))
-		}
-		downstream.Flush() //nolint:errcheck
 		downstream.Close() //nolint:errcheck
 		return
 	}

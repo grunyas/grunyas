@@ -191,6 +191,18 @@ func (m *mockProxyServer) AcquireUpstream() (types.UpstreamClientInterface, erro
 	return &mockUpstream{}, nil
 }
 
+func (m *mockProxyServer) AcquireUpstreamForSQL(sql string) (types.UpstreamClientInterface, error) {
+	return m.AcquireUpstream()
+}
+
+func (m *mockProxyServer) AcquireUpstreamLease(sql string, postWriteWindowActive bool, postWriteWindowRemainingMs int) (*types.UpstreamLease, error) {
+	up, err := m.AcquireUpstream()
+	if err != nil {
+		return nil, err
+	}
+	return &types.UpstreamLease{Client: up, NodeID: "node-1", Role: "primary"}, nil
+}
+
 func (m *mockProxyServer) Port() string {
 	return "write"
 }
@@ -199,5 +211,9 @@ func (m *mockProxyServer) PublishDecisionEvent(event interface{}) {
 }
 
 func (m *mockProxyServer) RejectReadPortWrite(sql, poolMode string) decisions.Event {
+	return decisions.Event{}
+}
+
+func (m *mockProxyServer) RejectCompatReclassification(sql, poolMode string) decisions.Event {
 	return decisions.Event{}
 }

@@ -5,11 +5,35 @@ import (
 	"testing"
 	"time"
 
+	"github.com/grunyas/grunyas/internal/classifier"
 	"github.com/grunyas/grunyas/internal/decisions"
 	"github.com/grunyas/grunyas/internal/policy"
+	"github.com/grunyas/grunyas/internal/server/types"
 	"github.com/grunyas/grunyas/internal/topology"
+	"github.com/jackc/pgx/v5/pgproto3"
 	"go.uber.org/zap"
 )
+
+// mockPoolMgr is a stub pool.Manager for routing tests.
+type mockPoolMgr struct{}
+
+func (m *mockPoolMgr) AcquireDbConnection() (types.UpstreamClientInterface, error) {
+	return &mockUpstream{}, nil
+}
+func (m *mockPoolMgr) PoolStats() types.PoolStats { return types.PoolStats{} }
+func (m *mockPoolMgr) Close()                     {}
+
+// mockUpstream is a stub upstream client for routing tests.
+type mockUpstream struct{}
+
+func (m *mockUpstream) Send(...pgproto3.FrontendMessage) error { return nil }
+func (m *mockUpstream) Flush() error                           { return nil }
+func (m *mockUpstream) Receive(ctx context.Context) (pgproto3.BackendMessage, error) {
+	return nil, nil
+}
+func (m *mockUpstream) TxStatus() byte    { return 'I' }
+func (m *mockUpstream) Release() error    { return nil }
+func (m *mockUpstream) Kill() error       { return nil }
 
 func TestLeaseNoNodes(t *testing.T) {
 	topo := topology.NewEmpty()
@@ -32,25 +56,136 @@ func TestLeaseNoNodes(t *testing.T) {
 	}
 }
 
-func TestLeaseCompatPortStub(t *testing.T) {
-	p := NewPipeline(nil, nil, nil, zap.NewNop())
-	result, _ := p.Lease(LeaseRequest{Port: "compat", PoolMode: "transaction", LeaseType: "transaction"})
+func TestLeaseCompatPortReadRoutesToReplica(t *testing.T) {
+	// M4: compat port with SELECT routes to a replica
+	topo := topology.NewTestTopology()
+	topo.AddTestNode("primary-1", "primary", topology.RolePrimary, topology.LivenessUp)
+	topo.AddTestNode("replica-1", "replica", topology.RoleReplica, topology.LivenessUp)
+	topo.SetTestNodePool("primary-1", &mockPoolMgr{})
+	topo.SetTestNodePool("replica-1", &mockPoolMgr{})
+
+	p := NewPipeline(topo, nil, nil, zap.NewNop())
+	result, _ := p.Lease(LeaseRequest{Port: "compat", PoolMode: "transaction", LeaseType: "transaction", SQL: "SELECT 1"})
+
+	if result.Error != nil {
+		t.Fatalf("unexpected error: %v", result.Error)
+	}
+	if result.Decision.Outcome.Kind != "leased" {
+		t.Fatalf("expected leased, got %s", result.Decision.Outcome.Kind)
+	}
+	if result.NodeID != "replica-1" {
+		t.Fatalf("expected replica-1, got %s", result.NodeID)
+	}
+	if result.Decision.Classification.Type != "read" {
+		t.Fatalf("expected read classification, got %s", result.Decision.Classification.Type)
+	}
+	if result.Decision.Consistency == nil || result.Decision.Consistency.Mode != "bounded_staleness" {
+		t.Fatalf("expected bounded_staleness consistency, got %+v", result.Decision.Consistency)
+	}
+}
+
+func TestLeaseCompatPortWriteRoutesToPrimary(t *testing.T) {
+	// M4: compat port with INSERT routes to the primary
+	topo := topology.NewTestTopology()
+	topo.AddTestNode("primary-1", "primary", topology.RolePrimary, topology.LivenessUp)
+	topo.AddTestNode("replica-1", "replica", topology.RoleReplica, topology.LivenessUp)
+	topo.SetTestNodePool("primary-1", &mockPoolMgr{})
+	topo.SetTestNodePool("replica-1", &mockPoolMgr{})
+
+	p := NewPipeline(topo, nil, nil, zap.NewNop())
+	result, _ := p.Lease(LeaseRequest{Port: "compat", PoolMode: "transaction", LeaseType: "transaction", SQL: "INSERT INTO foo VALUES (1)"})
+
+	if result.Error != nil {
+		t.Fatalf("unexpected error: %v", result.Error)
+	}
+	if result.Decision.Outcome.Kind != "leased" {
+		t.Fatalf("expected leased, got %s", result.Decision.Outcome.Kind)
+	}
+	if result.NodeID != "primary-1" {
+		t.Fatalf("expected primary-1, got %s", result.NodeID)
+	}
+	if result.Decision.Classification.Type != "write" {
+		t.Fatalf("expected write classification, got %s", result.Decision.Classification.Type)
+	}
+	if result.Decision.Consistency == nil || result.Decision.Consistency.Mode != "linearizable" {
+		t.Fatalf("expected linearizable consistency, got %+v", result.Decision.Consistency)
+	}
+}
+
+func TestLeaseCompatPortReadEmptyEligibleSetFallsBackToPrimary(t *testing.T) {
+	// M4: compat port read with no eligible replica falls back to primary
+	topo := topology.NewTestTopology()
+	topo.AddTestNode("primary-1", "primary", topology.RolePrimary, topology.LivenessUp)
+	// Replica is down — empty eligible set
+	topo.AddTestNode("replica-1", "replica", topology.RoleReplica, topology.LivenessDown)
+	topo.SetTestNodePool("primary-1", &mockPoolMgr{})
+	topo.SetTestNodePool("replica-1", &mockPoolMgr{})
+
+	p := NewPipeline(topo, nil, nil, zap.NewNop())
+	result, _ := p.Lease(LeaseRequest{Port: "compat", PoolMode: "transaction", LeaseType: "transaction", SQL: "SELECT 1"})
+
+	if result.Error != nil {
+		t.Fatalf("unexpected error: %v", result.Error)
+	}
+	if result.Decision.Outcome.Kind != "fallback" {
+		t.Fatalf("expected fallback, got %s", result.Decision.Outcome.Kind)
+	}
+	if result.NodeID != "primary-1" {
+		t.Fatalf("expected primary-1 fallback, got %s", result.NodeID)
+	}
+	if result.Decision.Outcome.Reason != "empty_eligible_set" {
+		t.Fatalf("expected empty_eligible_set reason, got %s", result.Decision.Outcome.Reason)
+	}
+	if result.Decision.Consistency == nil || result.Decision.Consistency.Mode != "linearizable" {
+		t.Fatalf("expected linearizable consistency for fallback, got %+v", result.Decision.Consistency)
+	}
+}
+
+func TestLeaseCompatPortWriteNoPrimary(t *testing.T) {
+	// M4: compat port write with no primary returns no_primary, not no_eligible_replica
+	topo := topology.NewTestTopology()
+	// Primary is down
+	topo.AddTestNode("primary-1", "primary", topology.RolePrimary, topology.LivenessDown)
+	topo.AddTestNode("replica-1", "replica", topology.RoleReplica, topology.LivenessUp)
+	topo.SetTestNodePool("primary-1", &mockPoolMgr{})
+	topo.SetTestNodePool("replica-1", &mockPoolMgr{})
+
+	p := NewPipeline(topo, nil, nil, zap.NewNop())
+	result, _ := p.Lease(LeaseRequest{Port: "compat", PoolMode: "transaction", LeaseType: "transaction", SQL: "UPDATE foo SET bar = 1"})
+
 	if result.Error == nil {
-		t.Fatal("expected error for compat port in M3")
+		t.Fatal("expected error when no primary is available")
 	}
 	if result.Decision.Outcome.Kind != "rejected" {
 		t.Fatalf("expected rejected, got %s", result.Decision.Outcome.Kind)
 	}
-	if result.Decision.Outcome.SQLState != "0A000" {
-		t.Fatalf("expected 0A000, got %s", result.Decision.Outcome.SQLState)
+	if result.Decision.Outcome.Reason != "no_primary" {
+		t.Fatalf("expected no_primary reason, got %s", result.Decision.Outcome.Reason)
 	}
-	if result.Decision.Outcome.Reason != "compat_port:m4_stub" {
-		t.Fatalf("expected compat_port:m4_stub reason, got %s", result.Decision.Outcome.Reason)
+	if result.Decision.Outcome.SQLState != "57P03" {
+		t.Fatalf("expected 57P03, got %s", result.Decision.Outcome.SQLState)
+	}
+	if result.Decision.Consistency == nil || result.Decision.Consistency.Mode != "linearizable" {
+		t.Fatalf("expected linearizable consistency, got %+v", result.Decision.Consistency)
+	}
+}
+
+func TestLeaseCompatPortReadNoNodes(t *testing.T) {
+	// Empty topology: compat port read hits no_nodes early return
+	topo := topology.NewEmpty()
+	p := NewPipeline(topo, nil, nil, zap.NewNop())
+	result, _ := p.Lease(LeaseRequest{Port: "compat", PoolMode: "transaction", LeaseType: "transaction", SQL: "SELECT 1"})
+	if result.Error == nil {
+		t.Fatal("expected error for empty topology")
+	}
+	if result.Decision.Outcome.Reason != "no_nodes" {
+		t.Fatalf("expected no_nodes, got %s", result.Decision.Outcome.Reason)
 	}
 }
 
 func TestLeaseDecisionsTotalIncremented(t *testing.T) {
-	p := NewPipeline(nil, nil, nil, zap.NewNop())
+	topo := topology.NewEmpty()
+	p := NewPipeline(topo, nil, nil, zap.NewNop())
 	before := p.DecisionsTotal.Load()
 	_, _ = p.Lease(LeaseRequest{Port: "compat", PoolMode: "transaction", LeaseType: "transaction"})
 	if p.DecisionsTotal.Load() != before+1 {
@@ -77,7 +212,7 @@ func TestFilterCandidatesReasonsInOrder(t *testing.T) {
 		},
 	}
 
-	candidates := p.filterCandidates(nodes, "read")
+	candidates := p.filterCandidates(nodes, "read", "", false)
 	if len(candidates) != 2 {
 		t.Fatalf("expected 2 candidates, got %d", len(candidates))
 	}
@@ -168,7 +303,7 @@ func TestFilterCandidatesReadPortRoleRejection(t *testing.T) {
 			Liveness:     topology.LivenessUp,
 		},
 	}
-	candidates := p.filterCandidates(nodes, "read")
+	candidates := p.filterCandidates(nodes, "read", "", false)
 	if len(candidates) != 1 {
 		t.Fatalf("expected 1 candidate, got %d", len(candidates))
 	}
@@ -212,7 +347,7 @@ func TestPipelineHysteresisPendingEligible(t *testing.T) {
 	// Evaluate: lag above threshold → policy goes pending
 	eng.EvaluateNode(nv, false)
 
-	candidates := p.filterCandidates(nodes, "read")
+	candidates := p.filterCandidates(nodes, "read", "", false)
 	if len(candidates) != 1 {
 		t.Fatalf("expected 1 candidate, got %d", len(candidates))
 	}
@@ -224,7 +359,7 @@ func TestPipelineHysteresisPendingEligible(t *testing.T) {
 	// Advance past dwell → policy goes active
 	clock.advance(6 * time.Second)
 	eng.EvaluateNode(nv, false)
-	candidates = p.filterCandidates(nodes, "read")
+	candidates = p.filterCandidates(nodes, "read", "", false)
 	if candidates[0].Eligible {
 		t.Fatalf("expected ineligible during active, got reasons: %v", candidates[0].Reasons)
 	}
@@ -232,7 +367,7 @@ func TestPipelineHysteresisPendingEligible(t *testing.T) {
 	// Recover → releasing (still ineligible)
 	nv.ReplicationLagMs = intPtr2(10)
 	eng.EvaluateNode(nv, false)
-	candidates = p.filterCandidates(nodes, "read")
+	candidates = p.filterCandidates(nodes, "read", "", false)
 	if candidates[0].Eligible {
 		t.Fatalf("expected ineligible during releasing, got reasons: %v", candidates[0].Reasons)
 	}
@@ -240,7 +375,7 @@ func TestPipelineHysteresisPendingEligible(t *testing.T) {
 	// Advance past release → clean (eligible again)
 	clock.advance(6 * time.Second)
 	eng.EvaluateNode(nv, false)
-	candidates = p.filterCandidates(nodes, "read")
+	candidates = p.filterCandidates(nodes, "read", "", false)
 	if !candidates[0].Eligible {
 		t.Fatalf("expected eligible after release, got reasons: %v", candidates[0].Reasons)
 	}
@@ -258,6 +393,191 @@ func (c *manualClock) advance(d time.Duration) {
 	c.t = c.t.Add(d)
 }
 
+func TestFilterCandidatesCompatPortReadFiltersReplicas(t *testing.T) {
+	p := NewPipeline(nil, nil, nil, zap.NewNop())
+	nodes := []topology.NodeView{
+		{
+			ID:           "primary-1",
+			DeclaredRole: topology.RolePrimary,
+			ObservedRole: topology.RolePrimary,
+			Liveness:     topology.LivenessUp,
+		},
+		{
+			ID:           "replica-1",
+			DeclaredRole: topology.RoleReplica,
+			ObservedRole: topology.RoleReplica,
+			Liveness:     topology.LivenessUp,
+		},
+	}
+	// Compat port + read classification → replica should be eligible, primary should not
+	candidates := p.filterCandidates(nodes, "compat", classifier.TypeRead, false)
+	if len(candidates) != 2 {
+		t.Fatalf("expected 2 candidates, got %d", len(candidates))
+	}
+	if candidates[0].Eligible {
+		t.Fatal("primary should be ineligible for compat+read")
+	}
+	if candidates[0].Reasons[0] != "role:not_replica" {
+		t.Fatalf("expected role:not_replica, got %v", candidates[0].Reasons)
+	}
+	if !candidates[1].Eligible {
+		t.Fatalf("replica should be eligible for compat+read, got %v", candidates[1].Reasons)
+	}
+}
+
+func TestFilterCandidatesCompatPortWriteFiltersPrimary(t *testing.T) {
+	p := NewPipeline(nil, nil, nil, zap.NewNop())
+	nodes := []topology.NodeView{
+		{
+			ID:           "primary-1",
+			DeclaredRole: topology.RolePrimary,
+			ObservedRole: topology.RolePrimary,
+			Liveness:     topology.LivenessUp,
+		},
+		{
+			ID:           "replica-1",
+			DeclaredRole: topology.RoleReplica,
+			ObservedRole: topology.RoleReplica,
+			Liveness:     topology.LivenessUp,
+		},
+	}
+	// Compat port + write classification → primary should be eligible, replica should not
+	candidates := p.filterCandidates(nodes, "compat", classifier.TypeWrite, false)
+	if len(candidates) != 2 {
+		t.Fatalf("expected 2 candidates, got %d", len(candidates))
+	}
+	if !candidates[0].Eligible {
+		t.Fatalf("primary should be eligible for compat+write, got %v", candidates[0].Reasons)
+	}
+	if candidates[1].Eligible {
+		t.Fatal("replica should be ineligible for compat+write")
+	}
+	if candidates[1].Reasons[0] != "role:not_primary" {
+		t.Fatalf("expected role:not_primary, got %v", candidates[1].Reasons)
+	}
+}
+
+func TestLeaseCompatPortClassifiesAndRoutes(t *testing.T) {
+	// M4: compat port classifies SQL and routes accordingly.
+	topo := topology.NewTestTopology()
+	topo.AddTestNode("primary-1", "primary", topology.RolePrimary, topology.LivenessUp)
+	topo.AddTestNode("replica-1", "replica", topology.RoleReplica, topology.LivenessUp)
+	topo.SetTestNodePool("primary-1", &mockPoolMgr{})
+	topo.SetTestNodePool("replica-1", &mockPoolMgr{})
+
+	p := NewPipeline(topo, nil, nil, zap.NewNop())
+
+	// SELECT → read → routes to replica
+	result, _ := p.Lease(LeaseRequest{Port: "compat", PoolMode: "transaction", LeaseType: "transaction", SQL: "SELECT 1"})
+	if result.Decision.Classification.Type != "read" {
+		t.Fatalf("expected read classification, got %s", result.Decision.Classification.Type)
+	}
+	if result.Decision.Outcome.Kind != "leased" {
+		t.Fatalf("expected leased outcome, got %s", result.Decision.Outcome.Kind)
+	}
+	if result.NodeID != "replica-1" {
+		t.Fatalf("expected replica-1, got %s", result.NodeID)
+	}
+	if result.Decision.Consistency == nil || result.Decision.Consistency.Mode != "bounded_staleness" {
+		t.Fatalf("expected bounded_staleness, got %+v", result.Decision.Consistency)
+	}
+
+	// INSERT → write → routes to primary
+	result, _ = p.Lease(LeaseRequest{Port: "compat", PoolMode: "transaction", LeaseType: "transaction", SQL: "INSERT INTO foo VALUES (1)"})
+	if result.Decision.Classification.Type != "write" {
+		t.Fatalf("expected write classification, got %s", result.Decision.Classification.Type)
+	}
+	if result.Decision.Outcome.Kind != "leased" {
+		t.Fatalf("expected leased outcome, got %s", result.Decision.Outcome.Kind)
+	}
+	if result.NodeID != "primary-1" {
+		t.Fatalf("expected primary-1, got %s", result.NodeID)
+	}
+	if result.Decision.Consistency == nil || result.Decision.Consistency.Mode != "linearizable" {
+		t.Fatalf("expected linearizable, got %+v", result.Decision.Consistency)
+	}
+
+	// WITH → write → routes to primary
+	result, _ = p.Lease(LeaseRequest{Port: "compat", PoolMode: "transaction", LeaseType: "transaction", SQL: "WITH foo AS (SELECT 1) SELECT * FROM foo"})
+	if result.Decision.Classification.Type != "write" {
+		t.Fatalf("expected write classification for WITH, got %s", result.Decision.Classification.Type)
+	}
+	if result.NodeID != "primary-1" {
+		t.Fatalf("expected primary-1 for WITH, got %s", result.NodeID)
+	}
+}
+
 func intPtr2(v int64) *int64 {
 	return &v
+}
+
+func TestLeaseCompatPortPostWriteWindowNarrowsToPrimary(t *testing.T) {
+	// M4 §2/§4: when PostWriteWindowActive is true, a read-classified
+	// statement must narrow the eligible set to the primary alone.
+	topo := topology.NewTestTopology()
+	topo.AddTestNode("primary-1", "primary", topology.RolePrimary, topology.LivenessUp)
+	topo.AddTestNode("replica-1", "replica", topology.RoleReplica, topology.LivenessUp)
+	topo.SetTestNodePool("primary-1", &mockPoolMgr{})
+	topo.SetTestNodePool("replica-1", &mockPoolMgr{})
+
+	p := NewPipeline(topo, nil, nil, zap.NewNop())
+	result, _ := p.Lease(LeaseRequest{
+		Port:                  "compat",
+		PoolMode:              "transaction",
+		LeaseType:             "transaction",
+		SQL:                   "SELECT 1",
+		PostWriteWindowActive: true,
+	})
+
+	if result.Error != nil {
+		t.Fatalf("unexpected error: %v", result.Error)
+	}
+	if result.Decision.Outcome.Kind != "leased" {
+		t.Fatalf("expected leased, got %s", result.Decision.Outcome.Kind)
+	}
+	if result.NodeID != "primary-1" {
+		t.Fatalf("expected primary-1 (window narrowed to primary), got %s", result.NodeID)
+	}
+	if result.Decision.Consistency == nil || result.Decision.Consistency.Mode != "post_write_window" {
+		t.Fatalf("expected post_write_window consistency, got %+v", result.Decision.Consistency)
+	}
+}
+
+// TestRejectCompatReclassificationCounters verifies that
+// RejectCompatReclassification increments DecisionsTotal, DecisionsRejected,
+// CompatReclassificationRejections, and PublishedTotal, and emits an event
+// with the correct outcome shape.
+func TestRejectCompatReclassificationCounters(t *testing.T) {
+	bus := decisions.NewBus(10, 10)
+	p := NewPipeline(topology.NewEmpty(), nil, bus, zap.NewNop())
+
+	prevTotal := p.DecisionsTotal.Load()
+	prevRejected := p.DecisionsRejected.Load()
+	prevCompat := p.CompatReclassificationRejections.Load()
+	prevPublished := p.PublishedTotal.Load()
+
+	event := p.RejectCompatReclassification("INSERT INTO foo VALUES (1)", "transaction")
+
+	if n := p.DecisionsTotal.Load(); n != prevTotal+1 {
+		t.Fatalf("DecisionsTotal: expected %d, got %d", prevTotal+1, n)
+	}
+	if n := p.DecisionsRejected.Load(); n != prevRejected+1 {
+		t.Fatalf("DecisionsRejected: expected %d, got %d", prevRejected+1, n)
+	}
+	if n := p.CompatReclassificationRejections.Load(); n != prevCompat+1 {
+		t.Fatalf("CompatReclassificationRejections: expected %d, got %d", prevCompat+1, n)
+	}
+	if n := p.PublishedTotal.Load(); n != prevPublished+1 {
+		t.Fatalf("PublishedTotal: expected %d, got %d", prevPublished+1, n)
+	}
+
+	if event.Outcome.Kind != "rejected" {
+		t.Fatalf("expected outcome.kind=rejected, got %q", event.Outcome.Kind)
+	}
+	if event.Outcome.SQLState != "25006" {
+		t.Fatalf("expected outcome.sqlstate=25006, got %q", event.Outcome.SQLState)
+	}
+	if event.Outcome.Reason != "compat:reclassification" {
+		t.Fatalf("expected outcome.reason=compat:reclassification, got %q", event.Outcome.Reason)
+	}
 }

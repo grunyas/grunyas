@@ -15,11 +15,12 @@ import (
 )
 
 type LeaseRequest struct {
-	Port         string
-	PoolMode     string
-	LeaseType    string
-	SQL          string
-	PoolSaturated map[topology.NodeID]bool
+	Port                       string
+	PoolMode                   string
+	LeaseType                  string
+	SQL                        string
+	PostWriteWindowActive      bool // M4: compat port post-write window state
+	PostWriteWindowRemainingMs int  // M4: remaining window ms for decision events
 }
 
 type LeaseResult struct {
@@ -37,16 +38,23 @@ type Pipeline struct {
 
 	readRR atomic.Uint64
 
-	DecisionsTotal    atomic.Int64
-	DecisionsLeased   atomic.Int64
-	DecisionsRejected atomic.Int64
-	PublishedTotal    atomic.Int64
-	EligibleSetRead   atomic.Int64
-	EligibleSetWrite  atomic.Int64
+	DecisionsTotal                    atomic.Int64
+	DecisionsLeased                   atomic.Int64
+	DecisionsRejected                 atomic.Int64
+	DecisionsFallback                 atomic.Int64
+	PublishedTotal                    atomic.Int64
+	EligibleSetRead                   atomic.Int64
+	EligibleSetWrite                  atomic.Int64
+	CompatReclassificationRejections  atomic.Int64
 
 	decisionCounters sync.Map // key: "port:outcome:reason", value: *atomic.Int64
 
 	decisionDurationHistograms sync.Map // key: port, value: *portHistogram
+
+	// Cached policy names resolved once at construction (stable for process lifetime)
+	defaultHealthPolicyName string
+	defaultLagPolicyName    string
+	defaultSatPolicyName    string
 }
 
 // Bucket boundaries for grunyas_routing_decision_duration_seconds.
@@ -72,12 +80,19 @@ func (h *portHistogram) observe(d time.Duration) {
 }
 
 func NewPipeline(topo *topology.Topology, policyEng *policy.Engine, bus *decisions.Bus, log *zap.Logger) *Pipeline {
-	return &Pipeline{
+	p := &Pipeline{
 		topo:         topo,
 		policyEng:    policyEng,
 		decisionsBus: bus,
 		logger:       log.With(zap.String("component", "routing")),
 	}
+	// Cache policy names once at construction (stable for process lifetime)
+	if policyEng != nil {
+		p.defaultHealthPolicyName = policyDefaultHealthNameOrFirst(policyEng)
+		p.defaultLagPolicyName = policyDefaultLagNameOrFirst(policyEng)
+		p.defaultSatPolicyName = policyDefaultSatNameOrFirst(policyEng)
+	}
+	return p
 }
 
 func (p *Pipeline) Bus() *decisions.Bus {
@@ -90,15 +105,15 @@ func (p *Pipeline) Bus() *decisions.Bus {
 func (p *Pipeline) RejectReadPortWrite(sql, poolMode string) decisions.Event {
 	p.DecisionsTotal.Add(1)
 
-	cls, clsSource := classifier.NewPortClassifier("read").Classify(sql)
+	cls := p.classify("read", sql)
 	event := decisions.Event{
 		Port:      "read",
 		PoolMode:  poolMode,
 		LeaseType: "transaction",
 		Source:    "client",
 		Classification: decisions.Classification{
-			Type:   string(cls),
-			Source: clsSource,
+			Type:   string(cls.Type),
+			Source: string(cls.Source),
 			SQL:    classifier.TruncateSQL(sql, 256),
 		},
 		Outcome: decisions.Outcome{
@@ -109,6 +124,40 @@ func (p *Pipeline) RejectReadPortWrite(sql, poolMode string) decisions.Event {
 	}
 
 	p.DecisionsRejected.Add(1)
+	p.emitEvent(event)
+	return event
+}
+
+// RejectCompatReclassification records a compat-port mid-transaction
+// reclassification rejection (read-leased transaction that issues a write)
+// through the pipeline so DecisionsTotal, DecisionsRejected,
+// PublishedTotal, decisionCounters, and the dedicated
+// CompatReclassificationRejections counter stay consistent.
+func (p *Pipeline) RejectCompatReclassification(sql, poolMode string) decisions.Event {
+	p.DecisionsTotal.Add(1)
+
+	cls := p.classify("compat", sql)
+	event := decisions.Event{
+		SchemaVersion: decisions.SchemaVersion,
+		Port:          "compat",
+		PoolMode:      poolMode,
+		LeaseType:     "transaction",
+		Source:        "client",
+		Classification: decisions.Classification{
+			Type:   string(cls.Type),
+			Source: string(cls.Source),
+			SQL:    classifier.TruncateSQL(sql, 256),
+		},
+		Outcome: decisions.Outcome{
+			Kind:     "rejected",
+			SQLState: "25006",
+			Reason:   "compat:reclassification",
+		},
+		Consistency: &decisions.Consistency{Mode: "bounded_staleness"},
+	}
+
+	p.DecisionsRejected.Add(1)
+	p.CompatReclassificationRejections.Add(1)
 	p.emitEvent(event)
 	return event
 }
@@ -129,8 +178,8 @@ func (p *Pipeline) Lease(req LeaseRequest) (*LeaseResult, error) {
 	}
 
 	if !p.isValidPort(req.Port) {
-		result.Error = &types.ProxyError{Code: "0A000", Message: "[grunyas] compat port classification not yet implemented (M4)"}
-		event.Outcome = decisions.Outcome{Kind: "rejected", SQLState: "0A000", Reason: "compat_port:m4_stub"}
+		result.Error = &types.ProxyError{Code: "0A000", Message: "[grunyas] invalid port"}
+		event.Outcome = decisions.Outcome{Kind: "rejected", SQLState: "0A000", Reason: "invalid_port"}
 		p.DecisionsRejected.Add(1)
 		result.Decision = event
 		p.emitEvent(event)
@@ -142,10 +191,10 @@ func (p *Pipeline) Lease(req LeaseRequest) (*LeaseResult, error) {
 		loadOrStoreHistogram(&p.decisionDurationHistograms, req.Port).observe(time.Since(start))
 	}()
 
-	cls, clsSource := p.classify(req.Port, req.SQL)
+	cls := p.classify(req.Port, req.SQL)
 	event.Classification = decisions.Classification{
-		Type:   string(cls),
-		Source: clsSource,
+		Type:   string(cls.Type),
+		Source: string(cls.Source),
 		SQL:    classifier.TruncateSQL(req.SQL, 256),
 	}
 
@@ -160,15 +209,23 @@ func (p *Pipeline) Lease(req LeaseRequest) (*LeaseResult, error) {
 		return &result, nil
 	}
 
-	candidates := p.filterCandidates(nodes, req.Port)
+	// For compat port, role filtering is driven by classification, not port.
+	classType := cls.Type
+	if req.Port != "compat" {
+		// write/read ports: the port itself determines the role filter
+		classType = ""
+	}
+	candidates := p.filterCandidates(nodes, req.Port, classType, req.PostWriteWindowActive)
 	event.Candidates = candidates
 
 	activePolicies := []string{}
-	for _, inst := range p.policyEng.Instances() {
-		for _, c := range candidates {
-			if state, _, _ := p.policyEng.CandidateState(inst.Name, c.NodeID); state == policy.StateActive {
-				activePolicies = append(activePolicies, inst.Name)
-				break
+	if p.policyEng != nil {
+		for _, inst := range p.policyEng.Instances() {
+			for _, c := range candidates {
+				if state, _, _ := p.policyEng.CandidateState(inst.Name, c.NodeID); state == policy.StateActive {
+					activePolicies = append(activePolicies, inst.Name)
+					break
+				}
 			}
 		}
 	}
@@ -176,17 +233,59 @@ func (p *Pipeline) Lease(req LeaseRequest) (*LeaseResult, error) {
 
 	eligible := eligibleNodes(candidates)
 
-	if req.Port == "read" {
+	if req.Port == "read" || req.Port == "compat" {
 		p.EligibleSetRead.Store(int64(len(eligible)))
 	} else {
 		p.EligibleSetWrite.Store(int64(len(eligible)))
 	}
 
 	if len(eligible) == 0 {
+		// M4: compat port falls back to primary on empty eligible set
+		if req.Port == "compat" && cls.Type == classifier.TypeRead {
+			primary, primaryOK := p.topo.Primary()
+			if primaryOK {
+				// Fallback to primary
+				chosen := primary.ID
+				event.Outcome = decisions.Outcome{
+					Kind:   "fallback",
+					NodeID: string(chosen),
+					Reason: "empty_eligible_set",
+				}
+				event.Consistency = &decisions.Consistency{Mode: "linearizable"}
+				result.NodeID = chosen
+
+				mgr, err := p.topo.PoolFor(chosen)
+				if err != nil {
+					result.Error = &types.ProxyError{Code: "57P03", Message: "[grunyas] no upstream available", Cause: err}
+					event.Outcome = decisions.Outcome{Kind: "rejected", SQLState: "57P03", Reason: "pool_lookup_failed"}
+					p.DecisionsRejected.Add(1)
+					result.Decision = event
+					p.emitEvent(event)
+					return &result, nil
+				}
+
+				upstream, err := mgr.AcquireDbConnection()
+				if err != nil {
+					result.Error = &types.ProxyError{Code: "53300", Message: "[grunyas] pool saturated", Cause: err}
+					event.Outcome = decisions.Outcome{Kind: "rejected", SQLState: "53300", Reason: "pool:acquisition_failed"}
+					p.DecisionsRejected.Add(1)
+					result.Decision = event
+					p.emitEvent(event)
+					return &result, nil
+				}
+
+				result.Upstream = upstream
+				p.DecisionsFallback.Add(1)
+				result.Decision = event
+				p.emitEvent(event)
+				return &result, nil
+			}
+		}
+
 		reason := "no_eligible_replica"
 		code := "57P03"
 		msg := "[grunyas] no eligible replica available"
-		if req.Port == "write" {
+		if req.Port == "write" || (req.Port == "compat" && cls.Type == classifier.TypeWrite) {
 			reason = "no_primary"
 			msg = "[grunyas] no primary available"
 		}
@@ -197,6 +296,12 @@ func (p *Pipeline) Lease(req LeaseRequest) (*LeaseResult, error) {
 			event.Consistency = &decisions.Consistency{Mode: "bounded_staleness"}
 		case "write":
 			event.Consistency = &decisions.Consistency{Mode: "linearizable"}
+		case "compat":
+			if cls.Type == classifier.TypeWrite {
+				event.Consistency = &decisions.Consistency{Mode: "linearizable"}
+			} else {
+				event.Consistency = &decisions.Consistency{Mode: "bounded_staleness"}
+			}
 		}
 		p.DecisionsRejected.Add(1)
 		result.Decision = event
@@ -253,8 +358,22 @@ func (p *Pipeline) Lease(req LeaseRequest) (*LeaseResult, error) {
 		event.Consistency = &decisions.Consistency{Mode: "bounded_staleness"}
 	case "write":
 		event.Consistency = &decisions.Consistency{Mode: "linearizable"}
+	case "compat":
+		if cls.Type == classifier.TypeWrite {
+			event.Consistency = &decisions.Consistency{Mode: "linearizable"}
+		} else if req.PostWriteWindowActive {
+			// M4 §4: post-write window active on compat port read
+			rem := req.PostWriteWindowRemainingMs
+			event.Consistency = &decisions.Consistency{
+				Mode:              "post_write_window",
+				WindowRemainingMs: &rem,
+			}
+		} else {
+			event.Consistency = &decisions.Consistency{Mode: "bounded_staleness"}
+		}
 	}
 
+	result.Decision = event
 	p.emitEvent(event)
 	return &result, nil
 }
@@ -316,29 +435,27 @@ func (p *Pipeline) StartObservationLoop(ctx context.Context, intervalMs int) {
 }
 
 func (p *Pipeline) isValidPort(port string) bool {
-	return port == "write" || port == "read"
+	return port == "write" || port == "read" || port == "compat"
 }
 
-func (p *Pipeline) classify(port, sql string) (classifier.ClassType, string) {
-	c := classifier.NewPortClassifier(port)
-	return c.Classify(sql)
+func (p *Pipeline) classify(port, sql string) classifier.Class {
+	// Unified classifier for all ports.
+	sess := &classifier.SessionState{Port: port, TxState: classifier.TxIdle}
+	stmt := classifier.Statement{SQL: sql}
+	return classifier.Classify(stmt, sess)
 }
 
 // filterCandidates evaluates every node against the full eligibility chain.
 // Each filter runs exactly once per node and either produces a reason or not.
 // Reason strings are drawn from a rule-3 committed vocabulary.
-func (p *Pipeline) filterCandidates(nodes []topology.NodeView, port string) []decisions.Candidate {
+// classType is used for compat-port role filtering; empty for write/read ports.
+func (p *Pipeline) filterCandidates(nodes []topology.NodeView, port string, classType classifier.Type, postWriteWindowActive bool) []decisions.Candidate {
 	var clusterID topology.SystemID
 	if p.topo != nil {
 		clusterID = p.topo.ClusterID()
 	}
 
-	var hName, lName, sName string
-	if p.policyEng != nil {
-		hName = policyDefaultHealthNameOrFirst(p.policyEng)
-		lName = policyDefaultLagNameOrFirst(p.policyEng)
-		sName = policyDefaultSatNameOrFirst(p.policyEng)
-	}
+	hName, lName, sName := p.defaultHealthPolicyName, p.defaultLagPolicyName, p.defaultSatPolicyName
 
 	candidates := make([]decisions.Candidate, 0, len(nodes))
 	for _, nv := range nodes {
@@ -358,19 +475,38 @@ func (p *Pipeline) filterCandidates(nodes []topology.NodeView, port string) []de
 		if nv.SystemID != "" && nv.SystemID != clusterID {
 			reasons = append(reasons, "system_id:mismatch")
 		}
-		if port == "write" && nv.ObservedRole != topology.RolePrimary {
+
+		// Role filtering: port-driven for write/read, classification-driven for compat.
+		// Post-write window on compat overrides the normal read→replica rule:
+		// the eligible set is narrowed to the primary alone. M4.md §2, §4.
+		if port == "compat" && classType == classifier.TypeRead && postWriteWindowActive {
+			// Window replaces role filter: only primary is eligible.
 			if nv.ObservedRole == topology.RoleUnknown {
 				reasons = append(reasons, "role:unknown")
-			} else {
-				reasons = append(reasons, "role:not_primary")
+			} else if nv.ObservedRole != topology.RolePrimary {
+				reasons = append(reasons, "post_write_window:primary_only")
 			}
-		} else if port == "read" && nv.ObservedRole != topology.RoleReplica {
-			if nv.ObservedRole == topology.RoleUnknown {
-				reasons = append(reasons, "role:unknown")
-			} else {
-				reasons = append(reasons, "role:not_replica")
+		} else {
+			needsPrimary := port == "write" ||
+				(port == "compat" && classType == classifier.TypeWrite)
+			needsReplica := port == "read" ||
+				(port == "compat" && classType == classifier.TypeRead)
+
+			if needsPrimary && nv.ObservedRole != topology.RolePrimary {
+				if nv.ObservedRole == topology.RoleUnknown {
+					reasons = append(reasons, "role:unknown")
+				} else {
+					reasons = append(reasons, "role:not_primary")
+				}
+			} else if needsReplica && nv.ObservedRole != topology.RoleReplica {
+				if nv.ObservedRole == topology.RoleUnknown {
+					reasons = append(reasons, "role:unknown")
+				} else {
+					reasons = append(reasons, "role:not_replica")
+				}
 			}
 		}
+
 		if !hEl {
 			if hCond != "" {
 				reasons = append(reasons, hCond)
@@ -378,7 +514,11 @@ func (p *Pipeline) filterCandidates(nodes []topology.NodeView, port string) []de
 				reasons = append(reasons, "liveness:not_up")
 			}
 		}
-		if !lEl {
+
+		// Lag filter short-circuit for write classification.
+		// A write-classified compat-port lease is never lag-filtered.
+		// M4.md §2: "lag-filter only fires when classification is read."
+		if classType != classifier.TypeWrite && !lEl {
 			if lCond != "" {
 				reasons = append(reasons, lCond)
 			} else {

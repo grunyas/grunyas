@@ -57,6 +57,17 @@ type ProxyInterface interface {
 	// AcquireUpstream obtains a connection from the pool.
 	AcquireUpstream() (UpstreamClientInterface, error)
 
+	// AcquireUpstreamForSQL obtains a connection from the pool using the
+	// routing pipeline with SQL classification. Used on the compat port.
+	AcquireUpstreamForSQL(sql string) (UpstreamClientInterface, error)
+
+	// AcquireUpstreamLease obtains a connection and its routing metadata
+	// from the pool using the routing pipeline with SQL classification.
+	// Used on the compat port so the session can track leased node role.
+	// postWriteWindowActive and postWriteWindowRemainingMs are passed to
+	// the routing pipeline for consistency-mode decision events (M4).
+	AcquireUpstreamLease(sql string, postWriteWindowActive bool, postWriteWindowRemainingMs int) (*UpstreamLease, error)
+
 	// Port returns the listen port identifier this proxy serves on ("write", "read", "compat").
 	Port() string
 
@@ -67,6 +78,20 @@ type ProxyInterface interface {
 	// RejectReadPortWrite routes a read-port write rejection through the
 	// pipeline so metrics stay consistent.
 	RejectReadPortWrite(sql, poolMode string) decisions.Event
+
+	// RejectCompatReclassification routes a compat-port mid-transaction
+	// reclassification rejection through the pipeline so DecisionsTotal,
+	// DecisionsRejected, PublishedTotal, and decisionCounters stay consistent.
+	RejectCompatReclassification(sql, poolMode string) decisions.Event
+}
+
+// UpstreamLease bundles an upstream connection with its routing metadata.
+// Returned by AcquireUpstreamLease so the session can track which node and
+// role a compat-port transaction is leased against.
+type UpstreamLease struct {
+	Client UpstreamClientInterface
+	NodeID string
+	Role   string
 }
 
 // PoolStats represents the current statistics of the database connection pool.
